@@ -74,6 +74,7 @@ const generateAzureOpenAIEmbedding = async (
 const EMBEDDING_DIMENSIONS_SMALL = 1536; // OpenAI's text-embedding-3-small outputs 1536 dimensions
 const EMBEDDING_DIMENSIONS_LARGE = 3072; // OpenAI's text-embedding-3-large outputs 3072 dimensions
 const BGE_DIMENSIONS = 1024; // BAAI/bge-m3 outputs 1024 dimensions
+const GEMINI_EMBEDDING_DIMENSIONS = 3072; // Google Gemini gemini-embedding-001 default output dimensions
 const FALLBACK_DIMENSIONS = 100; // Fallback implementation uses 100 dimensions
 
 // List of base URLs that support base64 embeddings
@@ -255,12 +256,18 @@ export async function createVectorIndex(
 
 // Get dimensions for a model
 const getDimensionsForModel = (model: string): number => {
+  model = model.toLowerCase();
   if (model.includes('bge-m3')) {
     return BGE_DIMENSIONS;
   } else if (model.includes('text-embedding-3-large')) {
     return EMBEDDING_DIMENSIONS_LARGE;
   } else if (model.includes('text-embedding-3')) {
     return EMBEDDING_DIMENSIONS_SMALL;
+  } else if (model.includes('gemini-embedding-001')) {
+    // Google Gemini gemini-embedding-001 defaults to 3072 dimensions.
+    // Future implementation improvements may allow configurable dimensions
+    // for Gemini models, but for now we will assume the default.
+    return GEMINI_EMBEDDING_DIMENSIONS;
   } else if (model === 'fallback' || model === 'simple-hash') {
     return FALLBACK_DIMENSIONS;
   }
@@ -935,6 +942,21 @@ async function checkDatabaseVectorDimensions(dimensionsNeeded: number): Promise<
 
         // Clear all existing vector embeddings with mismatched dimensions
         await clearMismatchedVectorData(dimensionsNeeded);
+      }
+
+      // Drop any existing index BEFORE altering the column type.
+      // This is required because PostgreSQL attempts to rebuild the index
+      // automatically during ALTER COLUMN, which fails when the new dimensions
+      // exceed the vector type HNSW limit (2000). For example, switching from
+      // 100-dimensional (fallback) to 3072-dimensional (gemini-embedding-001 or
+      // text-embedding-3-large) vectors would trigger error code 54000 from
+      // hnswbuild.c without this pre-emptive drop.
+      try {
+        await getAppDataSource().query(
+          `DROP INDEX IF EXISTS idx_vector_embeddings_embedding;`,
+        );
+      } catch (dropError: any) {
+        console.warn('Could not drop existing vector index before ALTER:', dropError?.message);
       }
 
       // Alter the column type with the new dimensions
