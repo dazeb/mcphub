@@ -796,10 +796,28 @@ const SettingsPage: React.FC = () => {
           );
         }
       } else {
-        const currentOpenaiApiKey =
-          tempSmartRoutingConfig.openaiApiKey || smartRoutingConfig.openaiApiKey;
+        // Get current OpenAI config values with explicit type checking and trim
+        const currentOpenaiApiKey = (typeof tempSmartRoutingConfig.openaiApiKey === 'string'
+          ? tempSmartRoutingConfig.openaiApiKey
+          : smartRoutingConfig.openaiApiKey || ''
+        ).trim();
+        const currentOpenaiApiBaseUrl = (typeof tempSmartRoutingConfig.openaiApiBaseUrl === 'string'
+          ? tempSmartRoutingConfig.openaiApiBaseUrl
+          : smartRoutingConfig.openaiApiBaseUrl || ''
+        ).trim();
+        const currentOpenaiApiEmbeddingModel = (typeof tempSmartRoutingConfig.openaiApiEmbeddingModel === 'string'
+          ? tempSmartRoutingConfig.openaiApiEmbeddingModel
+          : smartRoutingConfig.openaiApiEmbeddingModel || ''
+        ).trim();
+
         if (!currentOpenaiApiKey) {
           missingFields.push(t('settings.openaiApiKey') || 'OpenAI API Key');
+        }
+        if (!currentOpenaiApiBaseUrl) {
+          missingFields.push(t('settings.openaiApiBaseUrl') || 'OpenAI API Base URL');
+        }
+        if (!currentOpenaiApiEmbeddingModel) {
+          missingFields.push(t('settings.openaiApiEmbeddingModel') || 'OpenAI Embedding Model');
         }
       }
 
