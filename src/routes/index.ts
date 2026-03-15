@@ -13,10 +13,13 @@ import {
   reloadServer,
   toggleTool,
   updateToolDescription,
+  resetToolDescription,
   togglePrompt,
   updatePromptDescription,
+  resetPromptDescription,
   toggleResource,
   updateResourceDescription,
+  resetResourceDescription,
   updateSystemConfig,
 } from '../controllers/serverController.js';
 import {
@@ -193,10 +196,16 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   router.post('/servers/:name/reload', reloadServer);
   router.post('/servers/:serverName/tools/:toolName/toggle', toggleTool);
   router.put('/servers/:serverName/tools/:toolName/description', updateToolDescription);
+  router.delete('/servers/:serverName/tools/:toolName/description', resetToolDescription);
   router.post('/servers/:serverName/prompts/:promptName/toggle', togglePrompt);
   router.put('/servers/:serverName/prompts/:promptName/description', updatePromptDescription);
+  router.delete('/servers/:serverName/prompts/:promptName/description', resetPromptDescription);
   router.post('/servers/:serverName/resources/:resourceUri/toggle', toggleResource);
   router.put('/servers/:serverName/resources/:resourceUri/description', updateResourceDescription);
+  router.delete(
+    '/servers/:serverName/resources/:resourceUri/description',
+    resetResourceDescription,
+  );
   router.put('/system-config', updateSystemConfig);
 
   // Group management routes

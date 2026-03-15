@@ -10,18 +10,28 @@ import {
   Check,
   Copy,
 } from '@/components/icons/LucideIcons';
-import { callTool, ToolCallResult, updateToolDescription } from '@/services/toolService';
+import {
+  callTool,
+  ToolCallResult,
+  updateToolDescription,
+  resetToolDescription,
+} from '@/services/toolService';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useToast } from '@/contexts/ToastContext';
 import { Switch } from './ToggleGroup';
 import DynamicForm from './DynamicForm';
 import ToolResult from './ToolResult';
+import ResetDescriptionButton from './ResetDescriptionButton';
 
 interface ToolCardProps {
   server: string;
   tool: Tool;
   onToggle?: (toolName: string, enabled: boolean) => void;
-  onDescriptionUpdate?: (toolName: string, description: string) => void;
+  onDescriptionUpdate?: (
+    toolName: string,
+    description: string,
+    options?: { restored?: boolean },
+  ) => void;
 }
 
 // Helper to check for "empty" values
@@ -42,6 +52,7 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<ToolCallResult | null>(null);
   const [isEditingDescription, setIsEditingDescription] = useState(false);
+  const [isResettingDescription, setIsResettingDescription] = useState(false);
   const [customDescription, setCustomDescription] = useState(tool.description || '');
   const descriptionInputRef = useRef<HTMLInputElement>(null);
   const descriptionTextRef = useRef<HTMLSpanElement>(null);
@@ -65,6 +76,10 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
       setTextWidth(descriptionTextRef.current.offsetWidth);
     }
   }, [isEditingDescription, customDescription]);
+
+  useEffect(() => {
+    setCustomDescription(tool.description || '');
+  }, [tool.description]);
 
   // Generate a unique key for localStorage based on tool name and server
   const getStorageKey = useCallback(() => {
@@ -108,6 +123,27 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
 
   const handleDescriptionChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setCustomDescription(e.target.value);
+  };
+
+  const handleDescriptionReset = async () => {
+    setIsResettingDescription(true);
+
+    try {
+      const result = await resetToolDescription(server, tool.name);
+      if (result.success) {
+        const restoredDescription = result.description || '';
+        setCustomDescription(restoredDescription);
+        setIsEditingDescription(false);
+        onDescriptionUpdate?.(tool.name, restoredDescription, { restored: true });
+      } else {
+        showToast(result.error || t('tool.restoreDefaultFailed'), 'error');
+      }
+    } catch (error) {
+      console.error('Error resetting tool description:', error);
+      showToast(t('tool.restoreDefaultFailed'), 'error');
+    } finally {
+      setIsResettingDescription(false);
+    }
   };
 
   const handleDescriptionKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -234,9 +270,19 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
                       e.stopPropagation();
                       handleDescriptionSave();
                     }}
+                    disabled={isResettingDescription}
                   >
                     <Check size={16} />
                   </button>
+                  <ResetDescriptionButton
+                    title={t('tool.restoreDefault')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDescriptionReset();
+                    }}
+                    disabled={isResettingDescription}
+                    loading={isResettingDescription}
+                  />
                 </>
               ) : (
                 <>
@@ -252,6 +298,15 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
                   >
                     <Edit size={14} />
                   </button>
+                  <ResetDescriptionButton
+                    title={t('tool.restoreDefault')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDescriptionReset();
+                    }}
+                    disabled={isResettingDescription}
+                    loading={isResettingDescription}
+                  />
                 </>
               )}
             </span>

@@ -1,4 +1,4 @@
-import { apiPost, apiPut } from '../utils/fetchInterceptor';
+import { apiDelete, apiPost, apiPut } from '../utils/fetchInterceptor';
 
 export interface ToolCallRequest {
   toolName: string;
@@ -48,7 +48,7 @@ export const callTool = async (
       content: response?.content || [],
     };
   } catch (error) {
-    console.error('Error calling tool:', error);
+    console.error('Error calling tool', { toolName: request.toolName, server, error });
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
@@ -81,7 +81,7 @@ export const toggleTool = async (
       error: response.success ? undefined : response.message,
     };
   } catch (error) {
-    console.error('Error toggling tool:', error);
+    console.error('Error toggling tool', { serverName, toolName, enabled, error });
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
@@ -114,7 +114,38 @@ export const updateToolDescription = async (
       error: response.success ? undefined : response.message,
     };
   } catch (error) {
-    console.error('Error updating tool description:', error);
+    console.error('Error updating tool description', { serverName, toolName, error });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+    };
+  }
+};
+
+/**
+ * Reset a tool's description override for a specific server
+ */
+export const resetToolDescription = async (
+  serverName: string,
+  toolName: string,
+): Promise<{ success: boolean; error?: string; description?: string }> => {
+  try {
+    const response = await apiDelete<any>(
+      `/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/description`,
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('mcphub_token')}`,
+        },
+      },
+    );
+
+    return {
+      success: response.success,
+      error: response.success ? undefined : response.message,
+      description: response.data?.description,
+    };
+  } catch (error) {
+    console.error('Error resetting tool description', { serverName, toolName, error });
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',

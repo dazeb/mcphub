@@ -14,6 +14,7 @@ import {
   addServer,
   addOrUpdateServer,
   removeServer,
+  getServerByName,
   notifyToolChanged,
   syncToolEmbedding,
   toggleServerStatus,
@@ -26,6 +27,30 @@ import { cloneDefaultOAuthServerConfig } from '../constants/oauthServerDefaults.
 import { getServerDao, getGroupDao, getSystemConfigDao } from '../dao/DaoFactory.js';
 import { getBearerKeyDao } from '../dao/DaoFactory.js';
 import { UserContextService } from '../services/userContextService.js';
+
+type DescribableConfig = Record<string, { enabled: boolean; description?: string }>;
+
+const clearDescriptionOverride = (
+  items: DescribableConfig,
+  itemName: string,
+): DescribableConfig => {
+  const nextItems = { ...items };
+  const itemConfig = nextItems[itemName];
+
+  if (!itemConfig) {
+    return nextItems;
+  }
+
+  const { description: _description, ...remainingConfig } = itemConfig;
+
+  if (remainingConfig.enabled === false) {
+    nextItems[itemName] = { enabled: false };
+  } else {
+    delete nextItems[itemName];
+  }
+
+  return nextItems;
+};
 
 export const getAllServers = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -874,6 +899,64 @@ export const updateToolDescription = async (req: Request, res: Response): Promis
   }
 };
 
+// Reset tool description override for a specific server back to the upstream default
+export const resetToolDescription = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const serverName = decodeURIComponent(req.params.serverName);
+    const toolName = decodeURIComponent(req.params.toolName);
+
+    if (!serverName || !toolName) {
+      res.status(400).json({
+        success: false,
+        message: 'Server name and tool name are required',
+      });
+      return;
+    }
+
+    const serverDao = getServerDao();
+    const server = await serverDao.findById(serverName);
+
+    if (!server) {
+      res.status(404).json({
+        success: false,
+        message: 'Server not found',
+      });
+      return;
+    }
+
+    const tools = clearDescriptionOverride(server.tools || {}, toolName);
+
+    const result = await serverDao.updateTools(serverName, tools);
+
+    if (!result) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to save settings',
+      });
+      return;
+    }
+
+    notifyToolChanged();
+    syncToolEmbedding(serverName, toolName);
+
+    const defaultDescription =
+      getServerByName(serverName)?.tools.find((tool) => tool.name === toolName)?.description || '';
+
+    res.json({
+      success: true,
+      message: `Tool ${toolName} description reset successfully`,
+      data: {
+        description: defaultDescription,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+};
+
 export const updateSystemConfig = async (req: Request, res: Response): Promise<void> => {
   try {
     const {
@@ -1495,6 +1578,62 @@ export const updatePromptDescription = async (req: Request, res: Response): Prom
   }
 };
 
+export const resetPromptDescription = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const serverName = decodeURIComponent(req.params.serverName);
+    const promptName = decodeURIComponent(req.params.promptName);
+
+    if (!serverName || !promptName) {
+      res.status(400).json({
+        success: false,
+        message: 'Server name and prompt name are required',
+      });
+      return;
+    }
+
+    const serverDao = getServerDao();
+    const server = await serverDao.findById(serverName);
+
+    if (!server) {
+      res.status(404).json({
+        success: false,
+        message: 'Server not found',
+      });
+      return;
+    }
+
+    const prompts = clearDescriptionOverride(server.prompts || {}, promptName);
+    const result = await serverDao.updatePrompts(serverName, prompts);
+
+    if (!result) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to save settings',
+      });
+      return;
+    }
+
+    notifyToolChanged();
+
+    const defaultDescription =
+      getServerByName(serverName)?.prompts.find((prompt) => prompt.name === promptName)
+        ?.description || '';
+
+    res.json({
+      success: true,
+      message: `Prompt ${promptName} description reset successfully`,
+      data: {
+        description: defaultDescription,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+};
+
 // Toggle resource status for a specific server
 export const toggleResource = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -1623,6 +1762,62 @@ export const updateResourceDescription = async (req: Request, res: Response): Pr
     res.json({
       success: true,
       message: `Resource ${resourceUri} description updated successfully`,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+};
+
+export const resetResourceDescription = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const serverName = decodeURIComponent(req.params.serverName);
+    const resourceUri = decodeURIComponent(req.params.resourceUri);
+
+    if (!serverName || !resourceUri) {
+      res.status(400).json({
+        success: false,
+        message: 'Server name and resource URI are required',
+      });
+      return;
+    }
+
+    const serverDao = getServerDao();
+    const server = await serverDao.findById(serverName);
+
+    if (!server) {
+      res.status(404).json({
+        success: false,
+        message: 'Server not found',
+      });
+      return;
+    }
+
+    const resources = clearDescriptionOverride(server.resources || {}, resourceUri);
+    const result = await serverDao.updateResources(serverName, resources);
+
+    if (!result) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to save settings',
+      });
+      return;
+    }
+
+    notifyToolChanged();
+
+    const defaultDescription =
+      getServerByName(serverName)?.resources.find((resource) => resource.uri === resourceUri)
+        ?.description || '';
+
+    res.json({
+      success: true,
+      message: `Resource ${resourceUri} description reset successfully`,
+      data: {
+        description: defaultDescription,
+      },
     });
   } catch (error) {
     res.status(500).json({

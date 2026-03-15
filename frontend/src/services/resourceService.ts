@@ -1,4 +1,4 @@
-import { apiPost, apiPut } from '../utils/fetchInterceptor';
+import { apiDelete, apiPost, apiPut } from '../utils/fetchInterceptor';
 
 /**
  * Toggle a resource's enabled state for a specific server
@@ -24,7 +24,7 @@ export const toggleResource = async (
       error: response.success ? undefined : response.message,
     };
   } catch (error) {
-    console.error('Error toggling resource:', error);
+    console.error('Error toggling resource', { serverName, resourceUri, enabled, error });
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
@@ -56,7 +56,35 @@ export const updateResourceDescription = async (
       error: response.success ? undefined : response.message,
     };
   } catch (error) {
-    console.error('Error updating resource description:', error);
+    console.error('Error updating resource description', { serverName, resourceUri, error });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+    };
+  }
+};
+
+export const resetResourceDescription = async (
+  serverName: string,
+  resourceUri: string,
+): Promise<{ success: boolean; error?: string; description?: string }> => {
+  try {
+    const response = await apiDelete<any>(
+      `/servers/${encodeURIComponent(serverName)}/resources/${encodeURIComponent(resourceUri)}/description`,
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('mcphub_token')}`,
+        },
+      },
+    );
+
+    return {
+      success: response.success,
+      error: response.success ? undefined : response.message,
+      description: response.data?.description,
+    };
+  } catch (error) {
+    console.error('Error resetting resource description', { serverName, resourceUri, error });
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
