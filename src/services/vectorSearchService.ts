@@ -6,6 +6,7 @@ import { getSmartRoutingConfig, type SmartRoutingConfig } from '../utils/smartRo
 import { toFloat32Array } from '../utils/base64.js';
 import {
   truncateToTokenLimit,
+  truncateWithHeuristic,
   getModelDefaultTokenLimit,
 } from '../utils/tokenTruncation.js';
 import OpenAI from 'openai';
@@ -366,12 +367,24 @@ async function generateEmbedding(text: string): Promise<number[]> {
     smartRoutingConfig.embeddingMaxTokens ?? getModelDefaultTokenLimit(config.embeddingModel);
   const maxTokens = isSiliconFlow ? Math.floor(rawMaxTokens * TOKEN_SAFETY_FACTOR) : rawMaxTokens;
   
-  const truncatedText = await truncateToTokenLimit(
-    text,
-    maxTokens,
-    config.embeddingModel,
-    config.apiKey,
-  );
+  let truncatedText: string;
+  try {
+    truncatedText = await truncateToTokenLimit(
+      text,
+      maxTokens,
+      config.embeddingModel,
+      config.apiKey,
+    );
+  } catch (truncationError: any) {
+    console.warn(
+      `Token truncation failed for model ${config.embeddingModel}: ${
+        truncationError?.message ?? String(truncationError)
+      }. Falling back to character-based truncation.`,
+    );
+    // As a fallback, use the shared conservative character-based heuristic (~3 chars/token)
+    // to prevent oversized text from causing a failure in the embedding API call.
+    truncatedText = truncateWithHeuristic(text, maxTokens);
+  }
 
   // Determine encoding format based on configuration
   const encodingFormatSetting = smartRoutingConfig.embeddingEncodingFormat || 'auto';
