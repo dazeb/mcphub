@@ -231,8 +231,11 @@ export const deleteMcpServer = (sessionId: string): void => {
   delete servers[sessionId];
 };
 
-export const notifyToolChanged = async (name?: string) => {
-  await registerAllTools(false, name);
+export const notifyToolChanged = async (
+  name?: string,
+  options?: { reportEmbeddingProgress?: boolean },
+) => {
+  await registerAllTools(false, name, options);
   Object.values(servers).forEach((server) => {
     server
       .sendToolListChanged()
@@ -257,7 +260,12 @@ export const syncToolEmbedding = async (serverName: string, toolName: string) =>
     return;
   }
   // Save tool as vector embedding for search
-  saveToolsAsVectorEmbeddings(serverName, [tool]);
+  saveToolsAsVectorEmbeddings(serverName, [tool]).catch((error) => {
+    console.warn(
+      `[EMBED_SYNC_ERROR] Failed to sync embedding for tool "${toolName}" on server "${serverName}"`,
+    );
+    console.error('Error syncing single tool embedding', { serverName, toolName, error });
+  });
 };
 
 // Helper function to clean $schema field from inputSchema
@@ -664,7 +672,15 @@ const callToolWithReconnect = async (
             }));
 
             // Save tools as vector embeddings for search
-            saveToolsAsVectorEmbeddings(serverInfo.name, serverInfo.tools);
+            saveToolsAsVectorEmbeddings(serverInfo.name, serverInfo.tools).catch((error) => {
+              console.warn(
+                `[EMBED_SYNC_ERROR] Failed to sync tool embeddings after reconnect for server "${serverInfo.name}"`,
+              );
+              console.error('Error syncing tool embeddings after reconnect', {
+                serverName: serverInfo.name,
+                error,
+              });
+            });
           } catch (listToolsError) {
             console.warn(
               `Failed to reload tools after reconnection for server ${serverInfo.name}:`,
@@ -705,6 +721,7 @@ const callToolWithReconnect = async (
 export const initializeClientsFromSettings = async (
   isInit: boolean,
   serverName?: string,
+  options?: { reportEmbeddingProgress?: boolean },
 ): Promise<ServerInfo[]> => {
   const allServers: ServerConfigWithName[] = await getServerDao().findAll();
   const existingServerInfos = serverInfos;
@@ -810,7 +827,12 @@ export const initializeClientsFromSettings = async (
           );
 
           // Save tools as vector embeddings for search
-          saveToolsAsVectorEmbeddings(name, mcpTools);
+          saveToolsAsVectorEmbeddings(name, mcpTools, {
+            reportProgress: options?.reportEmbeddingProgress === true && serverName === name,
+          }).catch((error) => {
+            console.warn(`[EMBED_SYNC_ERROR] Failed to sync OpenAPI embeddings for server "${name}"`);
+            console.error('Error syncing OpenAPI tool embeddings', { serverName: name, error });
+          });
           continue;
         } catch (error) {
           console.error('Failed to initialize OpenAPI server', { serverName: name, error });
@@ -895,7 +917,17 @@ export const initializeClientsFromSettings = async (
                   inputSchema: cleanInputSchema(tool.inputSchema || {}),
                 }));
                 // Save tools as vector embeddings for search
-                saveToolsAsVectorEmbeddings(name, serverInfo.tools);
+                saveToolsAsVectorEmbeddings(name, serverInfo.tools, {
+                  reportProgress: options?.reportEmbeddingProgress === true && serverName === name,
+                }).catch((embeddingError) => {
+                  console.warn(
+                    `[EMBED_SYNC_ERROR] Failed to sync tool embeddings for connected server "${name}"`,
+                  );
+                  console.error('Error syncing tool embeddings for connected server', {
+                    serverName: name,
+                    error: embeddingError,
+                  });
+                });
               })
               .catch((error) => {
                 console.error(
@@ -1004,8 +1036,12 @@ export const initializeClientsFromSettings = async (
 };
 
 // Register all MCP tools
-export const registerAllTools = async (isInit: boolean, serverName?: string): Promise<void> => {
-  await initializeClientsFromSettings(isInit, serverName);
+export const registerAllTools = async (
+  isInit: boolean,
+  serverName?: string,
+  options?: { reportEmbeddingProgress?: boolean },
+): Promise<void> => {
+  await initializeClientsFromSettings(isInit, serverName, options);
 };
 
 // Get all server information

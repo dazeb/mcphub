@@ -10,8 +10,35 @@ import {
   getModelDefaultTokenLimit,
 } from '../utils/tokenTruncation.js';
 import { safeStringify } from '../utils/serialization.js';
+import logService from './logService.js';
 import OpenAI from 'openai';
 import axios from 'axios';
+
+const maskApiKey = (apiKey: string): string => {
+  if (!apiKey) {
+    return 'missing';
+  }
+  if (apiKey.length <= 10) {
+    return `${apiKey.substring(0, 2)}***${apiKey.substring(apiKey.length - 2)}`;
+  }
+  return `${apiKey.substring(0, 6)}***${apiKey.substring(apiKey.length - 4)}`;
+};
+
+const shellEscapeSingleQuotes = (value: string): string => value.replace(/'/g, `'"'"'`);
+
+const buildEmbeddingsDebugCurl = (
+  baseURL: string | undefined,
+  payload: { model: string; input: string; encoding_format: 'base64' | 'float' },
+): string => {
+  const normalizedBaseURL = (baseURL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const payloadJson = JSON.stringify(payload);
+  return [
+    `curl -s -X POST ${normalizedBaseURL}/embeddings`,
+    `  -H "Authorization: Bearer <YOUR_API_KEY>"`,
+    `  -H "Content-Type: application/json"`,
+    `  -d '${shellEscapeSingleQuotes(payloadJson)}'`,
+  ].join(' \\\n');
+};
 
 // Get OpenAI configuration from smartRouting settings or fallback to environment variables
 const getOpenAIConfig = async () => {
@@ -87,19 +114,348 @@ const generateAzureOpenAIEmbedding = async (
   return embedding;
 };
 
-// Constants for embedding models
-const EMBEDDING_DIMENSIONS_SMALL = 1536; // OpenAI's text-embedding-3-small outputs 1536 dimensions
-const EMBEDDING_DIMENSIONS_LARGE = 3072; // OpenAI's text-embedding-3-large outputs 3072 dimensions
-const BGE_DIMENSIONS = 1024; // BAAI/bge-m3 outputs 1024 dimensions
-const GEMINI_EMBEDDING_DIMENSIONS = 3072; // Google Gemini gemini-embedding-001 default output dimensions
-const FALLBACK_DIMENSIONS = 100; // Fallback implementation uses 100 dimensions
+// ============================================================================
+// Embedding Model Dimensions
+// ============================================================================
+// These constants define the vector dimension output for different embedding models.
+// When the model changes, the entire vector database may need reindexing.
+/** OpenAI text-embedding-3-small model produces 1536-dimensional vectors */
+const EMBEDDING_DIMENSIONS_SMALL = 1536;
+/** OpenAI text-embedding-3-large model produces 3072-dimensional vectors */
+const EMBEDDING_DIMENSIONS_LARGE = 3072;
+/** BAAI/bge-m3 model produces 1024-dimensional vectors */
+const BGE_DIMENSIONS = 1024;
+/** Google Gemini gemini-embedding-001 model produces 3072-dimensional vectors by default */
+const GEMINI_EMBEDDING_DIMENSIONS = 3072;
+/** Fallback embedding method (used when no API is configured) produces 100-dimensional vectors */
+const FALLBACK_DIMENSIONS = 100;
 
-// List of base URLs that support base64 embeddings
+// ============================================================================
+// Provider Support Configuration
+// ============================================================================
+/** Base URLs that support base64 embedding encoding (more efficient than float arrays) */
 const BASE64_EMBEDDING_SUPPORTED_PROVIDERS = [
   'https://api.openai.com',
   'https://api.siliconflow.cn',
   'https://openrouter.ai',
 ];
+
+// ============================================================================
+// Adaptive Pacing Configuration (Rate Limiting)
+// ============================================================================
+// These constants control the dynamic rate limiting mechanism that prevents
+// hitting provider rate limits. Rate limits are typically measured in 1-minute windows (RPM).
+// When 403/429 errors occur, the system enters a binary protection mode: pacing jumps
+// directly to 63 seconds, stays there while rate-limit responses continue, and resets back
+// to the base level after 63 seconds without new 403/429 errors. Retry-After, when present,
+// still takes precedence over all local timing decisions.
+// DEFAULT: 0 ms. The retry logic (Retry-After header → 63s fallback) already handles
+// rate limit recovery automatically. The adaptive pacing then self-calibrates upward
+// after each 403/429 and persists for subsequent calls. A non-zero baseline is only
+// needed when a provider requires a fixed minimum interval between requests.
+/** Initial delay between embedding API calls (ms). Increases on rate-limit errors. */
+const SAFE_BASE_PACING_DELAY_MS = 0;
+/** Increment to add when pacing delay increases (ms).
+ * Set equal to the max delay so the first 403/429 immediately enables full protection. */
+const SAFE_PACING_DELAY_STEP_MS = 63 * 1000;
+/** Maximum allowed pacing delay between API calls (ms).
+ * Set to 63 seconds: 60s RPM window + 3s safety margin. */
+const SAFE_MAX_PACING_DELAY_MS = 63 * 1000;
+/** Time to wait before allowing pacing delay to reset back to base level (ms).
+ * Set to 63 seconds: 60s for the RPM window reset + 3s safety margin.
+ * Aligned with how providers measure rate limits (requests per minute).
+ * After 63s without new 403/429 errors, the rate limit bucket has fully reset. */
+const SAFE_PACING_COOLDOWN_MS = 63 * 1000;
+
+// ============================================================================
+// Retry Policy Configuration
+// ============================================================================
+// These constants define the retry behavior for failed API calls.
+// Strategy:
+//   403/429 with Retry-After: always honor the server's specified wait, no time budget applied.
+//   403/429 without Retry-After: use 63s cooldown per retry, budget-limited to 5 minutes total.
+//   503/504: fixed exponential backoff sequence (4s, 8s, 16s, 30s, 60s, 120s, 240s), exactly 7 attempts.
+//            No time budget imposed — all 7 attempts will be made regardless of total elapsed time.
+/** Maximum total retry time for 403/429 rate-limit retries (ms). */
+const MAX_TOTAL_RETRY_TIME_MS = 5 * 60 * 1000; // 5 minutes
+/** Fixed exponential backoff wait sequence for 503/504 errors in milliseconds (7 attempts). */
+const RETRY_EXPONENTIAL_SEQUENCE_MS = [4000, 8000, 16000, 30000, 60000, 120000, 240000];
+/** Random jitter added to each retry delay to prevent thundering herd (ms) */
+const RETRY_JITTER_MS = 1000;
+/** HTTP status codes that trigger automatic retry (rate limits, server errors) */
+const RETRYABLE_STATUS_CODES = new Set([403, 429, 503, 504]);
+
+// ============================================================================
+// Runtime State for Pacing and Sync Management
+// ============================================================================
+// Current adaptive pacing delay between embedding API calls (ms).
+// Increases when rate-limit errors occur, decreases after cooldown period.
+let adaptivePacingDelayMs = SAFE_BASE_PACING_DELAY_MS;
+
+// Current configured baseline pacing delay between provider-backed embedding calls (ms).
+// This can be overridden from Smart Routing settings and may be set to 0.
+let configuredBasePacingDelayMs = SAFE_BASE_PACING_DELAY_MS;
+
+// Timestamp (ms) when pacing delay was last increased.
+// Used to calculate cooldown before allowing delay to decrease.
+let lastPacingIncreaseAt = 0;
+
+// Flag indicating a full embeddings resync has been scheduled.
+// Prevents multiple redundant resync operations.
+let fullResyncScheduled = false;
+
+// Flag indicating a full embeddings resync is currently in progress.
+// Prevents concurrent resync operations.
+let fullResyncInProgress = false;
+
+// Timestamp (ms) of the last embedding API call.
+// Used to calculate required wait time before next call in the queue.
+let lastEmbeddingCallAt = 0;
+
+// Promise chain that serializes all embedding API calls through a single queue.
+// Each call waits for the previous one to complete before starting.
+// Ensures that adaptive pacing is applied consistently across all parallel sync operations.
+let embeddingQueueTail: Promise<void> = Promise.resolve();
+
+const sleep = async (ms: number): Promise<void> => {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
+const withJitter = (baseDelayMs: number): number => {
+  return baseDelayMs + Math.floor(Math.random() * RETRY_JITTER_MS);
+};
+
+const extractErrorStatus = (error: any): number | undefined => {
+  const status = [error?.status, error?.response?.status, error?.cause?.status].find(
+    (value) => typeof value === 'number',
+  );
+
+  return status as number | undefined;
+};
+
+const isRetryableStatus = (status?: number): boolean => {
+  return typeof status === 'number' && RETRYABLE_STATUS_CODES.has(status);
+};
+
+/**
+ * Extract Retry-After header value from error response and convert to milliseconds.
+ * Handles both seconds (numeric) and HTTP-date formats.
+ * Returns undefined if no valid Retry-After header is found.
+ */
+const extractRetryAfterMs = (error: any): number | undefined => {
+  const retryAfter =
+    error?.response?.headers?.['retry-after'] ||
+    error?.response?.headers?.['Retry-After'] ||
+    error?.headers?.['retry-after'] ||
+    error?.headers?.['Retry-After'];
+
+  if (!retryAfter) {
+    return undefined;
+  }
+
+  // If it's numeric, treat as seconds and convert to milliseconds
+  const numericValue = parseInt(String(retryAfter), 10);
+  if (!isNaN(numericValue) && numericValue > 0) {
+    return numericValue * 1000;
+  }
+
+  // If it's an HTTP date, parse it and calculate delay until that time
+  try {
+    const retryAtTime = new Date(retryAfter).getTime();
+    if (!isNaN(retryAtTime)) {
+      const delayMs = Math.max(0, retryAtTime - Date.now());
+      return delayMs > 0 ? delayMs : undefined;
+    }
+  } catch (e) {
+    // Ignore parsing errors
+  }
+
+  return undefined;
+};
+
+const applyConfiguredBasePacingDelay = (basePacingDelayMs?: number): void => {
+  const normalizedBaseDelay =
+    typeof basePacingDelayMs === 'number' && !Number.isNaN(basePacingDelayMs) && basePacingDelayMs >= 0
+      ? Math.floor(basePacingDelayMs)
+      : SAFE_BASE_PACING_DELAY_MS;
+  const previousBaseDelay = configuredBasePacingDelayMs;
+
+  configuredBasePacingDelayMs = normalizedBaseDelay;
+
+  if (
+    adaptivePacingDelayMs === previousBaseDelay ||
+    adaptivePacingDelayMs < configuredBasePacingDelayMs
+  ) {
+    adaptivePacingDelayMs = configuredBasePacingDelayMs;
+  }
+};
+
+const getAdaptivePacingDelayMs = (): number => {
+  if (
+    lastPacingIncreaseAt > 0 &&
+    Date.now() - lastPacingIncreaseAt > SAFE_PACING_COOLDOWN_MS &&
+    adaptivePacingDelayMs > configuredBasePacingDelayMs
+  ) {
+    // After the cooldown period (aligned with rate limit window resets),
+    // immediately restore pacing to base level instead of decrementing gradually.
+    // This allows faster recovery and more throughput once the provider's rate limit resets.
+    adaptivePacingDelayMs = configuredBasePacingDelayMs;
+  }
+
+  return adaptivePacingDelayMs;
+};
+
+const increaseAdaptivePacingDelay = (status?: number): void => {
+  const previousDelay = adaptivePacingDelayMs;
+  adaptivePacingDelayMs = Math.min(
+    SAFE_MAX_PACING_DELAY_MS,
+    adaptivePacingDelayMs + SAFE_PACING_DELAY_STEP_MS,
+  );
+  lastPacingIncreaseAt = Date.now();
+
+  if (adaptivePacingDelayMs !== previousDelay) {
+    console.warn(
+      `[Embedding][Throttle] Increased pacing delay to ${adaptivePacingDelayMs}ms after status=${status ?? 'unknown'}`,
+    );
+  }
+};
+
+const executeWithRetry = async <T>(
+  operation: () => Promise<T>,
+  context: { provider: string; model?: string; baseURL?: string },
+): Promise<T> => {
+  let totalRetryTimeMs = 0;
+  let attempt = 1;
+  let exponentialAttempt = 0;
+
+  while (true) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      const status = extractErrorStatus(error);
+      const isRetryable = isRetryableStatus(status);
+
+      if (!isRetryable) {
+        throw error;
+      }
+
+      let waitMs: number;
+
+      if (status === 403 || status === 429) {
+        // STRATEGY FOR RATE LIMIT ERRORS (403/429):
+        // - With Retry-After header: always honor the server's instruction unconditionally.
+        //   Applying a self-imposed budget here would be counterproductive: if the server says
+        //   "wait 8 minutes", cutting it short means the next attempt would fail immediately again.
+        // - Without Retry-After header: use a 63s cooldown and apply the 5-minute budget as a
+        //   safety net to avoid retrying blindly forever.
+        increaseAdaptivePacingDelay(status);
+        const retryAfterMs = extractRetryAfterMs(error);
+        if (retryAfterMs !== undefined && retryAfterMs > 0) {
+          // Server specified an explicit wait — honor it regardless of accumulated time.
+          waitMs = retryAfterMs;
+          console.warn(
+            `[Embedding][Retry] provider=${context.provider}, model=${context.model || 'unknown'}, baseURL=${context.baseURL || 'default'}, status=${status}, attempt=${attempt}, respecting Retry-After header: ${waitMs}ms`,
+          );
+        } else {
+          // No Retry-After header: use 63 second cooldown and apply the 5-minute safety budget.
+          waitMs = 63 * 1000;
+          console.warn(
+            `[Embedding][Retry] provider=${context.provider}, model=${context.model || 'unknown'}, baseURL=${context.baseURL || 'default'}, status=${status}, attempt=${attempt}, applying 63s rate-limit cooldown (no Retry-After header found)`,
+          );
+
+          if (totalRetryTimeMs + waitMs > MAX_TOTAL_RETRY_TIME_MS) {
+            const remainingMs = MAX_TOTAL_RETRY_TIME_MS - totalRetryTimeMs;
+            console.warn(
+              `[Embedding][Retry] Max retry time limit reached (no Retry-After). totalTime=${totalRetryTimeMs}ms, nextWait=${waitMs}ms, remaining=${remainingMs}ms, limit=${MAX_TOTAL_RETRY_TIME_MS}ms. Throwing error.`,
+            );
+            throw error;
+          }
+        }
+
+        totalRetryTimeMs += waitMs;
+      } else {
+        // STRATEGY FOR OTHER ERRORS (503, 504, etc):
+        // Fixed exponential sequence: 4s, 8s, 16s, 30s, 60s, 120s, 240s — exactly 7 attempts.
+        // No time budget imposed; all 7 attempts will be made regardless of total elapsed time.
+        if (exponentialAttempt >= RETRY_EXPONENTIAL_SEQUENCE_MS.length) {
+          console.warn(
+            `[Embedding][Retry] Exhausted all ${RETRY_EXPONENTIAL_SEQUENCE_MS.length} exponential backoff attempts. provider=${context.provider}, model=${context.model || 'unknown'}, status=${status}. Throwing error.`,
+          );
+          throw error;
+        }
+
+        waitMs = withJitter(RETRY_EXPONENTIAL_SEQUENCE_MS[exponentialAttempt]);
+        console.warn(
+          `[Embedding][Retry] provider=${context.provider}, model=${context.model || 'unknown'}, baseURL=${context.baseURL || 'default'}, status=${status}, attempt=${attempt} (exponential ${exponentialAttempt + 1}/${RETRY_EXPONENTIAL_SEQUENCE_MS.length}), waiting=${waitMs}ms`,
+        );
+        exponentialAttempt++;
+      }
+
+      console.log(
+        `[Embedding][Retry] Attempt ${attempt} failed. Waiting ${waitMs}ms before retry...`,
+      );
+      await sleep(waitMs);
+      attempt++;
+    }
+  }
+};
+
+/**
+ * Serializes all embedding API calls through a single promise queue so that
+ * parallel sync operations cannot bypass the adaptive pacing delay.
+ */
+const withEmbeddingQueue = <T>(operation: () => Promise<T>): Promise<T> => {
+  const result = embeddingQueueTail.then(async () => {
+    const now = Date.now();
+    const elapsed = now - lastEmbeddingCallAt;
+    const pacingDelayMs = getAdaptivePacingDelayMs();
+    const waitMs = lastEmbeddingCallAt === 0 ? 0 : Math.max(0, pacingDelayMs - elapsed);
+    if (waitMs > 0) {
+      console.log(`[Embedding][Queue] Pacing wait ${waitMs}ms before next API call`);
+      await sleep(waitMs);
+    }
+    lastEmbeddingCallAt = Date.now();
+    return operation();
+  });
+  // Keep tail void-typed so the chain does not accumulate resolved values.
+  embeddingQueueTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+};
+
+const scheduleFullEmbeddingResync = (reason: string): void => {
+  if (fullResyncScheduled || fullResyncInProgress) {
+    console.log(`[Embedding] Full embeddings resync already in progress/scheduled. reason=${reason}`);
+    return;
+  }
+
+  fullResyncScheduled = true;
+  console.warn(`[Embedding] Scheduling full embeddings resync. reason=${reason}`);
+
+  setTimeout(async () => {
+    if (fullResyncInProgress) {
+      fullResyncScheduled = false;
+      return;
+    }
+
+    fullResyncScheduled = false;
+    fullResyncInProgress = true;
+
+    try {
+      await syncAllServerToolsEmbeddings();
+    } catch (error) {
+      console.error('[EMBED_SYNC_ERROR] Full embeddings resync failed', { reason, error });
+    } finally {
+      fullResyncInProgress = false;
+    }
+  }, 5000);
+};
 
 // pgvector index limits (as of pgvector 0.7.0+)
 // - vector type: up to 2,000 dimensions for both HNSW and IVFFlat
@@ -318,6 +674,7 @@ const supportBase64Embeddings = async (baseURL: string = ''): Promise<boolean> =
  */
 async function generateEmbedding(text: string): Promise<number[]> {
   const smartRoutingConfig = await getSmartRoutingConfig();
+  applyConfiguredBasePacingDelay(smartRoutingConfig.basePacingDelayMs);
   const provider = smartRoutingConfig.embeddingProvider || 'openai';
 
   // Normalize whitespace before generating the embedding (issue #639):
@@ -335,18 +692,27 @@ async function generateEmbedding(text: string): Promise<number[]> {
     }
 
     try {
-      return await generateAzureOpenAIEmbedding(text, smartRoutingConfig);
+      return await withEmbeddingQueue(() =>
+        executeWithRetry(
+          () => generateAzureOpenAIEmbedding(text, smartRoutingConfig),
+          {
+            provider: 'azure_openai',
+            model: smartRoutingConfig.azureOpenaiEmbeddingModel,
+            baseURL: azureConfig.endpoint,
+          },
+        ),
+      );
     } catch (error: any) {
-      const status = error?.response?.status;
+      const status = extractErrorStatus(error);
       const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `Azure OpenAI embeddings request failed (status=${status ?? 'unknown'}). Falling back to local embeddings.`,
+        `Azure OpenAI embeddings request failed after retries (status=${status ?? 'unknown'}).`,
       );
       console.warn(
         `Azure embedding config: endpoint=${azureConfig.endpoint || 'missing'}, deployment=${azureConfig.embeddingDeployment || 'missing'}, apiVersion=${azureConfig.apiVersion || 'missing'}`,
       );
       console.warn(`Embedding error: ${message}`);
-      return generateFallbackEmbedding(text);
+      throw error;
     }
   }
 
@@ -369,6 +735,7 @@ async function generateEmbedding(text: string): Promise<number[]> {
   const maxTokens = isSiliconFlow ? Math.floor(rawMaxTokens * TOKEN_SAFETY_FACTOR) : rawMaxTokens;
   
   let truncatedText: string;
+  const _truncateStart = Date.now();
   try {
     truncatedText = await truncateToTokenLimit(
       text,
@@ -386,6 +753,9 @@ async function generateEmbedding(text: string): Promise<number[]> {
     // to prevent oversized text from causing a failure in the embedding API call.
     truncatedText = truncateWithHeuristic(text, maxTokens);
   }
+  console.log(
+    `[Embedding] Truncation: ${text.length} → ${truncatedText.length} chars (${Date.now() - _truncateStart}ms, maxTokens=${maxTokens})`,
+  );
 
   // Determine encoding format based on configuration
   const encodingFormatSetting = smartRoutingConfig.embeddingEncodingFormat || 'auto';
@@ -397,13 +767,57 @@ async function generateEmbedding(text: string): Promise<number[]> {
     encodingFormat = encodingFormatSetting;
   }
 
+  const embeddingPayload = {
+    model: config.embeddingModel,
+    encoding_format: encodingFormat,
+    input: truncatedText,
+  } as const;
+
+  if (process.env.DEBUG === 'true') {
+    const debugCurl = buildEmbeddingsDebugCurl(config.baseURL, embeddingPayload);
+
+    console.log(
+      `[Embedding] HTTP request details: ${JSON.stringify(
+        {
+          url: `${(config.baseURL || 'https://api.openai.com/v1').replace(/\/+$/, '')}/embeddings`,
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${maskApiKey(config.apiKey || '')}`,
+            'Content-Type': 'application/json',
+          },
+          payload: embeddingPayload,
+        },
+        null,
+        2,
+      )}`,
+    );
+    console.log(
+      `[Embedding] Reproducible curl (copy/paste and replace <YOUR_API_KEY>):\n${debugCurl}`,
+    );
+  }
+
+  console.log(
+    `[Embedding] API request → model=${config.embeddingModel}, encoding_format=${encodingFormat}, input_length=${truncatedText.length} chars | input_preview: "${truncatedText.substring(0, 200).replace(/\s+/g, ' ')}"`,
+  );
+  const _requestStart = Date.now();
   try {
-    // Call OpenAI's embeddings API
-    const response = await openai.embeddings.create({
-      model: config.embeddingModel, // Modern model with better performance
-      encoding_format: encodingFormat,
-      input: truncatedText,
-    });
+    // Call OpenAI-compatible embeddings API with conservative retry/backoff policy.
+    const response = await withEmbeddingQueue(() =>
+      executeWithRetry(
+        () =>
+          openai.embeddings.create({
+            model: embeddingPayload.model,
+            encoding_format: embeddingPayload.encoding_format,
+            input: embeddingPayload.input,
+          }),
+        {
+          provider,
+          model: config.embeddingModel,
+          baseURL: config.baseURL,
+        },
+      ),
+    );
+    console.log(`[Embedding] API response OK in ${Date.now() - _requestStart}ms`);
 
     if (encodingFormat === 'base64' && typeof response.data[0].embedding === 'string') {
       const embeddingBase64Str = response.data[0].embedding as unknown as string;
@@ -413,18 +827,31 @@ async function generateEmbedding(text: string): Promise<number[]> {
     // Return the embedding
     return response.data[0].embedding;
   } catch (error: any) {
-    const status = error?.status ?? error?.response?.status;
+    const status = extractErrorStatus(error);
     const message = error instanceof Error ? error.message : String(error);
 
     console.warn(
-      `OpenAI embeddings request failed (status=${status ?? 'unknown'}). Falling back to local embeddings.`,
+      `OpenAI-compatible embeddings request failed after retries (status=${status ?? 'unknown'}).`,
     );
     console.warn(
       `Embedding config: baseURL=${config.baseURL || 'default'}, model=${config.embeddingModel || 'default'}`,
     );
     console.warn(`Embedding error: ${message}`);
+    console.warn(`[Embedding] Request took ${Date.now() - _requestStart}ms before failure`);
+    const errorDetails = {
+      name: (error as any)?.name,
+      message,
+      status,
+      code: (error as any)?.code,
+      responseStatus: (error as any)?.response?.status,
+      responseErrorMessage: (error as any)?.response?.data?.error?.message,
+      requestId:
+        (error as any)?.response?.headers?.['x-request-id'] ??
+        (error as any)?.response?.headers?.['request-id'],
+    };
+    console.warn(`[Embedding] Error details: ${safeStringify(errorDetails)}`);
 
-    return generateFallbackEmbedding(text);
+    throw error;
   }
 }
 
@@ -538,6 +965,9 @@ function generateFallbackEmbedding(text: string): number[] {
 export const saveToolsAsVectorEmbeddings = async (
   serverName: string,
   tools: Tool[],
+  options: {
+    reportProgress?: boolean;
+  } = {},
 ): Promise<void> => {
   try {
     if (tools.length === 0) {
@@ -552,16 +982,37 @@ export const saveToolsAsVectorEmbeddings = async (
 
     // Ensure database is initialized before using repository
     if (!isDatabaseConnected()) {
-      console.info('Database not initialized, initializing...');
+      console.log('Database not initialized, initializing...');
       await initializeDatabase();
     }
 
     const config = await getOpenAIConfig();
+    const embeddingProvider = smartRoutingConfig.embeddingProvider || 'openai';
+    const persistedEmbeddingModel =
+      embeddingProvider === 'azure_openai'
+        ? smartRoutingConfig.azureOpenaiEmbeddingModel || 'text-embedding-3-small'
+        : config.embeddingModel;
     const vectorRepository = getRepositoryFactory(
       'vectorEmbeddings',
     )() as VectorEmbeddingRepository;
 
-    for (const tool of tools) {
+    let hasCheckedVectorDimensions = false;
+    let vectorDimensionsReset = false;
+
+    const shouldReport = options.reportProgress === true;
+    const emitProgress = (current: number, status: 'started' | 'in_progress' | 'completed' | 'error') => {
+      if (!shouldReport) return;
+      logService.emitStreamEvent({
+        type: 'embedding-sync-progress',
+        progress: { serverName, current, total: tools.length, status },
+      });
+    };
+
+    emitProgress(0, 'started');
+
+    for (let _toolIdx = 0; _toolIdx < tools.length; _toolIdx++) {
+      const tool = tools[_toolIdx];
+
       // Create searchable text from tool information
       const searchableText = [
         tool.name,
@@ -580,31 +1031,57 @@ export const saveToolsAsVectorEmbeddings = async (
         .filter(Boolean)
         .join(' ');
 
-      // Generate embedding
-      const embedding = await generateEmbedding(searchableText);
+      console.log(
+        `[Embedding] [${serverName}] Tool ${_toolIdx + 1}/${tools.length}: "${tool.name}" | raw text: ${searchableText.length} chars | preview: "${searchableText.substring(0, 200).replace(/\s+/g, ' ')}"`,
+      );
 
-      // Check database compatibility before saving
-      await checkDatabaseVectorDimensions(embedding.length);
+      try {
+        // Generate embedding
+        const embedding = await generateEmbedding(searchableText);
 
-      // Save embedding
-      await vectorRepository.saveEmbedding(
-        'tool',
-        `${serverName}:${tool.name}`,
-        searchableText,
-        embedding,
-        {
-          serverName,
-          toolName: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-        },
-        config.embeddingModel, // Store the model used for this embedding
+        // Check database compatibility once per server sync.
+        if (!hasCheckedVectorDimensions) {
+          vectorDimensionsReset = await checkDatabaseVectorDimensions(embedding.length);
+          hasCheckedVectorDimensions = true;
+        }
+
+        // Save embedding
+        await vectorRepository.saveEmbedding(
+          'tool',
+          `${serverName}:${tool.name}`,
+          searchableText,
+          embedding,
+          {
+            serverName,
+            toolName: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+          },
+          persistedEmbeddingModel, // Store the model based on the active embedding provider
+        );
+        emitProgress(_toolIdx + 1, _toolIdx + 1 === tools.length ? 'completed' : 'in_progress');
+      } catch (error: any) {
+        const status = extractErrorStatus(error);
+        const message = error instanceof Error ? error.message : String(error);
+
+        console.warn(
+          `[EMBED_SYNC_ERROR] Server "${serverName}" failed while embedding tool "${tool.name}" (status=${status ?? 'unknown'}): ${message}`,
+        );
+        emitProgress(_toolIdx, 'error');
+        throw error;
+      }
+    }
+
+    if (vectorDimensionsReset) {
+      scheduleFullEmbeddingResync(
+        `Vector dimensions changed while syncing server "${serverName}"`,
       );
     }
 
     console.log('Saved tool embeddings', safeStringify({ serverName, toolCount: tools.length }));
   } catch (error) {
     console.error('Error saving tool embeddings', safeStringify({ serverName, error }));
+    throw error;
   }
 };
 
@@ -886,6 +1363,9 @@ export const syncAllServerToolsEmbeddings = async (): Promise<void> => {
           totalToolsSynced += server.tools.length;
           serversSynced++;
         } catch (error) {
+          console.warn(
+            `[EMBED_SYNC_ERROR] Failed to sync tool embeddings for server "${server.name}"`,
+          );
           console.error(
             'Failed to sync tool embeddings for server',
             safeStringify({
@@ -919,7 +1399,7 @@ export const syncAllServerToolsEmbeddings = async (): Promise<void> => {
  * @param dimensionsNeeded The number of dimensions required
  * @returns Promise that resolves when check is complete
  */
-async function checkDatabaseVectorDimensions(dimensionsNeeded: number): Promise<void> {
+async function checkDatabaseVectorDimensions(dimensionsNeeded: number): Promise<boolean> {
   try {
     // First check if database is initialized
     if (!getAppDataSource().isInitialized) {
@@ -1050,7 +1530,10 @@ async function checkDatabaseVectorDimensions(dimensionsNeeded: number): Promise<
       }
 
       console.log('Successfully configured vector dimensions', { dimensionsNeeded });
+      return true;
     }
+
+    return false;
   } catch (error: any) {
     console.error('Error checking or updating vector dimensions', { error });
     throw new Error(`Vector dimension check failed: ${error?.message || 'Unknown error'}`);
