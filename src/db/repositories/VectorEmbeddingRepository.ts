@@ -2,6 +2,11 @@ import { VectorEmbedding } from '../entities/VectorEmbedding.js';
 import BaseRepository from './BaseRepository.js';
 import { getAppDataSource } from '../connection.js';
 
+// Escape special characters for SQL LIKE patterns.
+// This is used in methods that filter by content_id with a prefix,
+// to ensure that server names with special characters don't break the query.
+const escapeLikePattern = (value: string): string => value.replace(/([\\%_])/g, '\\$1');
+
 export class VectorEmbeddingRepository extends BaseRepository<VectorEmbedding> {
   constructor() {
     super(VectorEmbedding);
@@ -173,18 +178,65 @@ export class VectorEmbeddingRepository extends BaseRepository<VectorEmbedding> {
   }
 
   /**
+   * Count tool embeddings for a specific server that were generated with a given model.
+   * Used to determine whether embeddings are already up-to-date before regenerating.
+   * @param serverName Server name
+   * @param model Embedding model identifier
+   * @returns Number of matching embeddings
+   */
+  async countByServerNameAndModel(serverName: string, model: string): Promise<number> {
+    const prefix = `${escapeLikePattern(serverName)}:%`;
+
+    return this.repository
+      .createQueryBuilder('ve')
+      .where('ve.content_type = :ct', { ct: 'tool' })
+      .andWhere("ve.content_id LIKE :prefix ESCAPE '\\'", { prefix })
+      .andWhere('ve.model = :model', { model })
+      .getCount();
+  }
+
+  /**
+   * Return tool embedding identities for a specific server and model.
+   * Used by skip-check logic to verify exact tool IDs and tool-set hash.
+   */
+  async getToolIdentityByServerNameAndModel(
+    serverName: string,
+    model: string,
+  ): Promise<Array<{ contentId: string; toolSetHash?: string }>> {
+    const prefix = `${escapeLikePattern(serverName)}:%`;
+
+    const rows = await this.repository
+      .createQueryBuilder('ve')
+      .select(['ve.content_id', 've.metadata'])
+      .where('ve.content_type = :ct', { ct: 'tool' })
+      .andWhere("ve.content_id LIKE :prefix ESCAPE '\\'", { prefix })
+      .andWhere('ve.model = :model', { model })
+      .getMany();
+
+    return rows.map((row) => ({
+      contentId: row.content_id,
+      toolSetHash:
+        row.metadata && typeof row.metadata === 'object'
+          ? (row.metadata as Record<string, unknown>).toolSetHash?.toString()
+          : undefined,
+    }));
+  }
+
+  /**
    * Delete tool embeddings for a specific server
    * @param serverName Server name
    * @returns Number of deleted embeddings
    */
   async deleteByServerName(serverName: string): Promise<number> {
     try {
+      const prefix = `${escapeLikePattern(serverName)}:%`;
+
       const result = await this.repository
         .createQueryBuilder()
         .delete()
         .from(VectorEmbedding)
         .where('content_type = :contentType', { contentType: 'tool' })
-        .andWhere('content_id LIKE :prefix', { prefix: `${serverName}:%` })
+        .andWhere("content_id LIKE :prefix ESCAPE '\\'", { prefix })
         .execute();
 
       return result.affected || 0;

@@ -1,7 +1,7 @@
 import { getRepositoryFactory } from '../db/index.js';
 import { VectorEmbeddingRepository } from '../db/repositories/index.js';
 import { Tool } from '../types/index.js';
-import { getAppDataSource, isDatabaseConnected, initializeDatabase } from '../db/connection.js';
+import { getAppDataSource, isDatabaseConnected, initializeDatabase, reconnectDatabase } from '../db/connection.js';
 import { getSmartRoutingConfig, type SmartRoutingConfig } from '../utils/smartRouting.js';
 import { toFloat32Array } from '../utils/base64.js';
 import {
@@ -11,6 +11,7 @@ import {
 } from '../utils/tokenTruncation.js';
 import { safeStringify } from '../utils/serialization.js';
 import logService from './logService.js';
+import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
 import axios from 'axios';
 
@@ -957,8 +958,51 @@ function generateFallbackEmbedding(text: string): number[] {
   return vector;
 }
 
+const stableHashSerialize = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableHashSerialize(item)).join(',')}]`;
+  }
+
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    return `{${entries
+      .map(([key, val]) => `${JSON.stringify(key)}:${stableHashSerialize(val)}`)
+      .join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+};
+
+const buildToolSetHash = (tools: Tool[]): string => {
+  const normalized = tools
+    .map((tool) => ({
+      name: tool.name || '',
+      description: tool.description || '',
+      inputSchema: tool.inputSchema || null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return createHash('sha256').update(stableHashSerialize(normalized)).digest('hex');
+};
+
 /**
  * Save tool information as vector embeddings
+ *
+ * Uses a two-phase approach to prevent DB connection staleness:
+ *   Phase 1 — Generate all embeddings in memory (no DB access). For servers with many
+ *             tools and slow/unavailable embedding providers (e.g. BAAI/bge-m3 behind
+ *             a restricted network), this phase can take 10-60 s. Keeping DB operations
+ *             out of this phase avoids exhausting connection-pool idle timeouts.
+ *   Phase 2 — Verify the connection is still alive with a lightweight SELECT 1, reconnect
+ *             if necessary, call checkDatabaseVectorDimensions exactly ONCE (not once per
+ *             tool), and then persist all embeddings in a tight write loop.
+ *
  * @param serverName Server name
  * @param tools Array of tools to save
  */
@@ -969,6 +1013,22 @@ export const saveToolsAsVectorEmbeddings = async (
     reportProgress?: boolean;
   } = {},
 ): Promise<void> => {
+  const shouldReport = options.reportProgress === true;
+  let progressErrorEmitted = false;
+  let lastProgressCurrent = 0;
+
+  const emitProgress = (current: number, status: 'started' | 'in_progress' | 'completed' | 'error') => {
+    if (!shouldReport) return;
+    lastProgressCurrent = current;
+    if (status === 'error') {
+      progressErrorEmitted = true;
+    }
+    logService.emitStreamEvent({
+      type: 'embedding-sync-progress',
+      progress: { serverName, current, total: tools.length, status },
+    });
+  };
+
   try {
     if (tools.length === 0) {
       console.warn('No tools to save as vector embeddings', { serverName });
@@ -980,7 +1040,7 @@ export const saveToolsAsVectorEmbeddings = async (
       return;
     }
 
-    // Ensure database is initialized before using repository
+    // Ensure database is initialized before starting
     if (!isDatabaseConnected()) {
       console.log('Database not initialized, initializing...');
       await initializeDatabase();
@@ -992,21 +1052,78 @@ export const saveToolsAsVectorEmbeddings = async (
       embeddingProvider === 'azure_openai'
         ? smartRoutingConfig.azureOpenaiEmbeddingModel || 'text-embedding-3-small'
         : config.embeddingModel;
-    const vectorRepository = getRepositoryFactory(
-      'vectorEmbeddings',
-    )() as VectorEmbeddingRepository;
 
-    let hasCheckedVectorDimensions = false;
+    const expectedContentIds = tools
+      .map((tool) => `${serverName}:${tool.name}`)
+      .sort((a, b) => a.localeCompare(b));
+    const expectedToolSetHash = buildToolSetHash(tools);
+
+    // ── Skip check: avoid regenerating embeddings that are already up-to-date ──
+    // Validate exact content IDs and a tool-set hash/version marker to avoid
+    // false positives when only counts match but the actual tool set changed.
+    // This is an optimization to skip the expensive embedding generation phase when
+    // nothing changed, which can save a lot of time for servers with many tools and
+    // slow embedding providers. It also prevents rewrites on every server restart.
+    if (isDatabaseConnected()) {
+      try {
+        const skipCheckRepo = getRepositoryFactory(
+          'vectorEmbeddings',
+        )() as VectorEmbeddingRepository;
+        const existingCount = await skipCheckRepo.countByServerNameAndModel(
+          serverName,
+          persistedEmbeddingModel,
+        );
+
+        if (existingCount !== tools.length) {
+          console.log(
+            `[Embedding] [${serverName}] Generating embeddings: existing=${existingCount}, expected=${tools.length} (model=${persistedEmbeddingModel}, hash=${expectedToolSetHash.substring(0, 12)})`,
+          );
+        } else {
+          const existingIdentities = await skipCheckRepo.getToolIdentityByServerNameAndModel(
+            serverName,
+            persistedEmbeddingModel,
+          );
+
+          const existingContentIds = existingIdentities
+            .map((item) => item.contentId)
+            .sort((a, b) => a.localeCompare(b));
+          const hasExactContentIds =
+            existingContentIds.length === expectedContentIds.length &&
+            existingContentIds.every((contentId, idx) => contentId === expectedContentIds[idx]);
+          const hasMatchingToolSetHash =
+            existingIdentities.length > 0 &&
+            existingIdentities.every((item) => item.toolSetHash === expectedToolSetHash);
+
+          if (hasExactContentIds && hasMatchingToolSetHash) {
+            console.log(
+              `[Embedding] [${serverName}] Skipping — tool set already up-to-date (model=${persistedEmbeddingModel}, hash=${expectedToolSetHash.substring(0, 12)})`,
+            );
+            return;
+          }
+
+          console.log(
+            `[Embedding] [${serverName}] Generating embeddings: existing=${existingCount}, expected=${tools.length} (model=${persistedEmbeddingModel}, hash=${expectedToolSetHash.substring(0, 12)})`,
+          );
+        }
+      } catch (skipCheckError: any) {
+        console.warn(
+          `[Embedding] [${serverName}] Skip check failed, proceeding with full sync: ${skipCheckError?.message ?? skipCheckError}`,
+        );
+      }
+    }
+
+    // ── Phase 1: Generate all embeddings in memory (no DB access) ──────────────
+    // This can take a significant amount of time for servers with many tools and
+    // slow or unreachable embedding providers. Performing DB writes here would
+    // interleave long network/compute waits with DB queries, risking connection
+    // pool staleness (empty driverError) on the subsequent writes.
+    const toolEmbeddings: Array<{
+      tool: Tool;
+      searchableText: string;
+      embedding: number[];
+    }> = [];
+
     let vectorDimensionsReset = false;
-
-    const shouldReport = options.reportProgress === true;
-    const emitProgress = (current: number, status: 'started' | 'in_progress' | 'completed' | 'error') => {
-      if (!shouldReport) return;
-      logService.emitStreamEvent({
-        type: 'embedding-sync-progress',
-        progress: { serverName, current, total: tools.length, status },
-      });
-    };
 
     emitProgress(0, 'started');
 
@@ -1036,30 +1153,9 @@ export const saveToolsAsVectorEmbeddings = async (
       );
 
       try {
-        // Generate embedding
         const embedding = await generateEmbedding(searchableText);
-
-        // Check database compatibility once per server sync.
-        if (!hasCheckedVectorDimensions) {
-          vectorDimensionsReset = await checkDatabaseVectorDimensions(embedding.length);
-          hasCheckedVectorDimensions = true;
-        }
-
-        // Save embedding
-        await vectorRepository.saveEmbedding(
-          'tool',
-          `${serverName}:${tool.name}`,
-          searchableText,
-          embedding,
-          {
-            serverName,
-            toolName: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          },
-          persistedEmbeddingModel, // Store the model based on the active embedding provider
-        );
-        emitProgress(_toolIdx + 1, _toolIdx + 1 === tools.length ? 'completed' : 'in_progress');
+        toolEmbeddings.push({ tool, searchableText, embedding });
+        emitProgress(_toolIdx + 1, 'in_progress');
       } catch (error: any) {
         const status = extractErrorStatus(error);
         const message = error instanceof Error ? error.message : String(error);
@@ -1072,6 +1168,53 @@ export const saveToolsAsVectorEmbeddings = async (
       }
     }
 
+    // ── Phase 2: Persist embeddings to DB ──────────────────────────────────────
+    // Probe the connection before writing; reconnect if it went stale during the
+    // (potentially long) embedding-generation phase above.
+    if (!isDatabaseConnected()) {
+      console.info('Database connection lost during embedding generation, reinitializing...');
+      await initializeDatabase();
+    } else {
+      try {
+        await getAppDataSource().query('SELECT 1');
+      } catch {
+        console.warn(
+          'DB connection stale after embedding generation for server %s — reconnecting...',
+          serverName,
+        );
+        await reconnectDatabase();
+      }
+    }
+
+    const vectorRepository = getRepositoryFactory(
+      'vectorEmbeddings',
+    )() as VectorEmbeddingRepository;
+
+    // Check DB vector dimensions exactly once for the whole batch (all embeddings
+    // produced by the same model always share the same dimension count).
+    if (toolEmbeddings.length > 0) {
+      vectorDimensionsReset = await checkDatabaseVectorDimensions(toolEmbeddings[0].embedding.length);
+    }
+
+    for (const { tool, searchableText, embedding } of toolEmbeddings) {
+      await vectorRepository.saveEmbedding(
+        'tool',
+        `${serverName}:${tool.name}`,
+        searchableText,
+        embedding,
+        {
+          serverName,
+          toolName: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          toolSetHash: expectedToolSetHash,
+        },
+        persistedEmbeddingModel,
+      );
+    }
+
+    emitProgress(toolEmbeddings.length, 'completed');
+
     if (vectorDimensionsReset) {
       scheduleFullEmbeddingResync(
         `Vector dimensions changed while syncing server "${serverName}"`,
@@ -1080,6 +1223,9 @@ export const saveToolsAsVectorEmbeddings = async (
 
     console.log('Saved tool embeddings', safeStringify({ serverName, toolCount: tools.length }));
   } catch (error) {
+    if (shouldReport && !progressErrorEmitted) {
+      emitProgress(lastProgressCurrent, 'error');
+    }
     console.error('Error saving tool embeddings', safeStringify({ serverName, error }));
     throw error;
   }
@@ -1530,7 +1676,10 @@ async function checkDatabaseVectorDimensions(dimensionsNeeded: number): Promise<
       }
 
       console.log('Successfully configured vector dimensions', { dimensionsNeeded });
-      return true;
+      // Only signal that a full resync is needed when existing data was cleared due
+      // to a real dimension change. When currentDimensions === 0 it is a first-time
+      // setup — there are no stale embeddings to re-generate.
+      return currentDimensions !== 0;
     }
 
     return false;
