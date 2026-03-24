@@ -49,6 +49,11 @@ export class AppServer {
 
   constructor() {
     this.app = express();
+    const trustProxySetting =
+      process.env.TRUST_PROXY === 'true'
+        ? 1
+        : false;
+    this.app.set('trust proxy', trustProxySetting);
     this.app.use(
       cors({
         origin: true,
