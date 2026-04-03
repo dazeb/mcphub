@@ -625,3 +625,93 @@ export interface ActivityFilterOptions {
   groups: string[];
   keyNames: string[];
 }
+
+// Configuration template types for team sharing
+export interface ConfigTemplate {
+  version: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  servers: Record<string, TemplateServerConfig>;
+  groups: TemplateGroup[];
+  requiredEnvVars: string[];
+}
+
+export interface TemplateServerConfig {
+  type?: ServerConfig['type'];
+  description?: string;
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  passthroughHeaders?: string[];
+  enabled?: boolean;
+  enableKeepAlive?: boolean;
+  keepAliveInterval?: number;
+  tools?: Record<string, { enabled: boolean; description?: string }>;
+  prompts?: Record<string, { enabled: boolean; description?: string }>;
+  resources?: Record<string, { enabled: boolean; description?: string }>;
+  options?: ServerConfig['options'];
+  proxy?: ProxychainsConfig;
+  oauth?: {
+    clientId?: string;
+    clientSecret?: string;
+    scopes?: string[];
+    accessToken?: string;
+    refreshToken?: string;
+    dynamicRegistration?: {
+      enabled?: boolean;
+      issuer?: string;
+      registrationEndpoint?: string;
+      metadata?: {
+        client_name?: string;
+        client_uri?: string;
+        logo_uri?: string;
+        scope?: string;
+        redirect_uris?: string[];
+        grant_types?: string[];
+        response_types?: string[];
+        token_endpoint_auth_method?: string;
+        contacts?: string[];
+        software_id?: string;
+        software_version?: string;
+        [key: string]: any;
+      };
+      initialAccessToken?: string;
+    };
+    resource?: string;
+    authorizationEndpoint?: string;
+    tokenEndpoint?: string;
+  };
+  openapi?: {
+    url?: string;
+    schema?: Record<string, any>;
+    version?: string;
+    security?: OpenAPISecurityConfig;
+    passthroughHeaders?: string[];
+  };
+}
+
+export interface TemplateGroup {
+  name: string;
+  description?: string;
+  servers: IGroupServerConfig[];
+}
+
+export interface TemplateImportResult {
+  success: boolean;
+  serversCreated: number;
+  serversSkipped: number;
+  groupsCreated: number;
+  groupsSkipped: number;
+  requiredEnvVars: string[];
+  details: TemplateImportDetail[];
+}
+
+export interface TemplateImportDetail {
+  type: 'server' | 'group';
+  name: string;
+  action: 'created' | 'skipped' | 'failed';
+  message?: string;
+}
