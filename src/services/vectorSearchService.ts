@@ -2,6 +2,7 @@ import { getRepositoryFactory } from '../db/index.js';
 import { VectorEmbeddingRepository } from '../db/repositories/index.js';
 import { Tool } from '../types/index.js';
 import { getAppDataSource, isDatabaseConnected, initializeDatabase, reconnectDatabase } from '../db/connection.js';
+import { getServerDao } from '../dao/index.js';
 import { getSmartRoutingConfig, type SmartRoutingConfig } from '../utils/smartRouting.js';
 import { toFloat32Array } from '../utils/base64.js';
 import {
@@ -9,7 +10,7 @@ import {
   truncateWithHeuristic,
   getModelDefaultTokenLimit,
 } from '../utils/tokenTruncation.js';
-import { safeStringify } from '../utils/serialization.js';
+import { safeStringify, summarizeErrorForLogging } from '../utils/serialization.js';
 import logService from './logService.js';
 import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
@@ -705,14 +706,16 @@ async function generateEmbedding(text: string): Promise<number[]> {
       );
     } catch (error: any) {
       const status = extractErrorStatus(error);
-      const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `Azure OpenAI embeddings request failed after retries (status=${status ?? 'unknown'}).`,
+        'Azure OpenAI embeddings request failed after retries',
+        {
+          status: status ?? 'unknown',
+          endpoint: azureConfig.endpoint || 'missing',
+          deployment: azureConfig.embeddingDeployment || 'missing',
+          apiVersion: azureConfig.apiVersion || 'missing',
+          error,
+        },
       );
-      console.warn(
-        `Azure embedding config: endpoint=${azureConfig.endpoint || 'missing'}, deployment=${azureConfig.embeddingDeployment || 'missing'}, apiVersion=${azureConfig.apiVersion || 'missing'}`,
-      );
-      console.warn(`Embedding error: ${message}`);
       throw error;
     }
   }
@@ -829,28 +832,13 @@ async function generateEmbedding(text: string): Promise<number[]> {
     return response.data[0].embedding;
   } catch (error: any) {
     const status = extractErrorStatus(error);
-    const message = error instanceof Error ? error.message : String(error);
-
-    console.warn(
-      `OpenAI-compatible embeddings request failed after retries (status=${status ?? 'unknown'}).`,
-    );
-    console.warn(
-      `Embedding config: baseURL=${config.baseURL || 'default'}, model=${config.embeddingModel || 'default'}`,
-    );
-    console.warn(`Embedding error: ${message}`);
-    console.warn(`[Embedding] Request took ${Date.now() - _requestStart}ms before failure`);
-    const errorDetails = {
-      name: (error as any)?.name,
-      message,
-      status,
-      code: (error as any)?.code,
-      responseStatus: (error as any)?.response?.status,
-      responseErrorMessage: (error as any)?.response?.data?.error?.message,
-      requestId:
-        (error as any)?.response?.headers?.['x-request-id'] ??
-        (error as any)?.response?.headers?.['request-id'],
-    };
-    console.warn(`[Embedding] Error details: ${safeStringify(errorDetails)}`);
+    console.warn('OpenAI-compatible embeddings request failed after retries', {
+      status: status ?? 'unknown',
+      baseURL: config.baseURL || 'default',
+      model: config.embeddingModel || 'default',
+      requestDurationMs: Date.now() - _requestStart,
+      error,
+    });
 
     throw error;
   }
@@ -991,6 +979,32 @@ const buildToolSetHash = (tools: Tool[]): string => {
   return createHash('sha256').update(stableHashSerialize(normalized)).digest('hex');
 };
 
+const buildServerSearchableText = (serverName: string, description?: string | null): string =>
+  [serverName, description || ''].filter(Boolean).join(' ');
+
+const parseEmbeddingMetadata = (
+  metadata: unknown,
+): Record<string, any> | null => {
+  if (!metadata) {
+    return null;
+  }
+
+  if (typeof metadata === 'string') {
+    try {
+      return JSON.parse(metadata);
+    } catch (error) {
+      console.error('Error parsing vector embedding metadata string', safeStringify({ error }));
+      return null;
+    }
+  }
+
+  if (typeof metadata === 'object') {
+    return metadata as Record<string, any>;
+  }
+
+  return null;
+};
+
 /**
  * Save tool information as vector embeddings
  *
@@ -1052,6 +1066,9 @@ export const saveToolsAsVectorEmbeddings = async (
       embeddingProvider === 'azure_openai'
         ? smartRoutingConfig.azureOpenaiEmbeddingModel || 'text-embedding-3-small'
         : config.embeddingModel;
+    const serverConfig = await getServerDao().findById(serverName);
+    const serverDescription = serverConfig?.description || '';
+    const serverSearchableText = buildServerSearchableText(serverName, serverDescription);
 
     const expectedContentIds = tools
       .map((tool) => `${serverName}:${tool.name}`)
@@ -1093,8 +1110,12 @@ export const saveToolsAsVectorEmbeddings = async (
           const hasMatchingToolSetHash =
             existingIdentities.length > 0 &&
             existingIdentities.every((item) => item.toolSetHash === expectedToolSetHash);
+          const existingServerEmbedding = await skipCheckRepo.findByContentIdentity('server', serverName);
+          const hasCurrentServerEmbedding =
+            existingServerEmbedding?.model === persistedEmbeddingModel &&
+            existingServerEmbedding.text_content === serverSearchableText && existingServerEmbedding.embedding != null;
 
-          if (hasExactContentIds && hasMatchingToolSetHash) {
+          if (hasExactContentIds && hasMatchingToolSetHash && hasCurrentServerEmbedding) {
             console.log(
               `[Embedding] [${serverName}] Skipping — tool set already up-to-date (model=${persistedEmbeddingModel}, hash=${expectedToolSetHash.substring(0, 12)})`,
             );
@@ -1158,14 +1179,29 @@ export const saveToolsAsVectorEmbeddings = async (
         emitProgress(_toolIdx + 1, 'in_progress');
       } catch (error: any) {
         const status = extractErrorStatus(error);
-        const message = error instanceof Error ? error.message : String(error);
-
-        console.warn(
-          `[EMBED_SYNC_ERROR] Server "${serverName}" failed while embedding tool "${tool.name}" (status=${status ?? 'unknown'}): ${message}`,
-        );
+        console.warn('[EMBED_SYNC_ERROR] Failed while embedding tool', {
+          serverName,
+          toolName: tool.name,
+          status: status ?? 'unknown',
+          error: summarizeErrorForLogging(error),
+        });
         emitProgress(_toolIdx, 'error');
         throw error;
       }
+    }
+
+    let serverEmbedding: number[];
+    try {
+      serverEmbedding = await generateEmbedding(serverSearchableText);
+    } catch (error: any) {
+      const status = extractErrorStatus(error);
+      console.warn('[EMBED_SYNC_ERROR] Failed while embedding server metadata', {
+        serverName,
+        status: status ?? 'unknown',
+        error: summarizeErrorForLogging(error),
+      });
+      emitProgress(toolEmbeddings.length, 'error');
+      throw error;
     }
 
     // ── Phase 2: Persist embeddings to DB ──────────────────────────────────────
@@ -1192,8 +1228,10 @@ export const saveToolsAsVectorEmbeddings = async (
 
     // Check DB vector dimensions exactly once for the whole batch (all embeddings
     // produced by the same model always share the same dimension count).
-    if (toolEmbeddings.length > 0) {
-      vectorDimensionsReset = await checkDatabaseVectorDimensions(toolEmbeddings[0].embedding.length);
+    if (toolEmbeddings.length > 0 || serverEmbedding.length > 0) {
+      vectorDimensionsReset = await checkDatabaseVectorDimensions(
+        toolEmbeddings[0]?.embedding.length ?? serverEmbedding.length,
+      );
     }
 
     for (const { tool, searchableText, embedding } of toolEmbeddings) {
@@ -1212,6 +1250,18 @@ export const saveToolsAsVectorEmbeddings = async (
         persistedEmbeddingModel,
       );
     }
+
+    await vectorRepository.saveEmbedding(
+      'server',
+      serverName,
+      serverSearchableText,
+      serverEmbedding,
+      {
+        serverName,
+        description: serverDescription,
+      },
+      persistedEmbeddingModel,
+    );
 
     emitProgress(toolEmbeddings.length, 'completed');
 
@@ -1257,83 +1307,86 @@ export const searchToolsByVector = async (
     const vectorRepository = getRepositoryFactory(
       'vectorEmbeddings',
     )() as VectorEmbeddingRepository;
+    const queryEmbedding = await generateEmbedding(query);
 
-    // Search by text using vector similarity
-    const results = await vectorRepository.searchByText(
-      query,
-      generateEmbedding,
-      limit,
-      threshold,
-      ['tool'],
-    );
+    const [toolResults, rawServerResults] = await Promise.all([
+      vectorRepository.searchSimilar(queryEmbedding, limit, threshold, ['tool']),
+      vectorRepository.searchSimilar(queryEmbedding, 50, 0.1, ['server']),
+    ]);
 
-    // Filter by server names if provided
-    let filteredResults = results;
-    if (serverNames && serverNames.length > 0) {
-      filteredResults = results.filter((result) => {
-        if (typeof result.embedding.metadata === 'string') {
-          try {
-            const parsedMetadata = JSON.parse(result.embedding.metadata);
-            return serverNames.includes(parsedMetadata.serverName);
-          } catch (error) {
-            return false;
-          }
-        }
-        return false;
-      });
-    }
+    const allowedServerNames = serverNames && serverNames.length > 0 ? new Set(serverNames) : null;
+    const serverScoreMap = new Map<string, number>();
 
-    // Transform results to a more useful format
-    return filteredResults.map((result) => {
-      // Check if we have metadata as a string that needs to be parsed
-      if (result.embedding?.metadata && typeof result.embedding.metadata === 'string') {
-        try {
-          // Parse the metadata string as JSON
-          const parsedMetadata = JSON.parse(result.embedding.metadata);
+    for (const result of rawServerResults) {
+      const parsedMetadata = parseEmbeddingMetadata(result.embedding?.metadata);
+      const resultServerName = parsedMetadata?.serverName || result.embedding?.content_id;
 
-          if (parsedMetadata.serverName && parsedMetadata.toolName) {
-            // We have properly structured metadata
-            return {
-              serverName: parsedMetadata.serverName,
-              toolName: parsedMetadata.toolName,
-              description: parsedMetadata.description || '',
-              inputSchema: parsedMetadata.inputSchema || {},
-              similarity: result.similarity,
-              searchableText: result.embedding.text_content,
-            };
-          }
-        } catch (error) {
-          console.error(
-            'Error parsing vector embedding metadata string',
-            safeStringify({ error }),
-          );
-          // Fall through to the extraction logic below
-        }
+      if (!resultServerName || (allowedServerNames && !allowedServerNames.has(resultServerName))) {
+        continue;
       }
 
-      // Extract tool info from text_content if metadata is not available or parsing failed
-      const textContent = result.embedding?.text_content || '';
+      const existingScore = serverScoreMap.get(resultServerName) ?? Number.NEGATIVE_INFINITY;
+      if (result.similarity > existingScore) {
+        serverScoreMap.set(resultServerName, result.similarity);
+      }
+    }
 
-      // Extract toolName (first word of text_content)
-      const toolNameMatch = textContent.match(/^(\S+)/);
-      const toolName = toolNameMatch ? toolNameMatch[1] : '';
+    // Filter by server names if provided
+    const filteredResults = allowedServerNames
+      ? toolResults.filter((result) => {
+          const parsedMetadata = parseEmbeddingMetadata(result.embedding?.metadata);
+          return !!parsedMetadata?.serverName && allowedServerNames.has(parsedMetadata.serverName);
+        })
+      : toolResults;
 
-      // Extract serverName from toolName if it follows the pattern "serverName_toolPart"
-      const serverNameMatch = toolName.match(/^([^_]+)_/);
-      const serverName = serverNameMatch ? serverNameMatch[1] : 'unknown';
+    // Transform results to a more useful format
+    return filteredResults
+      .map((result) => {
+        const parsedMetadata = parseEmbeddingMetadata(result.embedding?.metadata);
 
-      // Extract description (everything after the first word)
-      const description = textContent.replace(/^\S+\s*/, '').trim();
+        if (parsedMetadata?.serverName && parsedMetadata?.toolName) {
+          const serverSimilarityBoost = serverScoreMap.get(parsedMetadata.serverName);
+          return {
+            serverName: parsedMetadata.serverName,
+            toolName: parsedMetadata.toolName,
+            description: parsedMetadata.description || '',
+            inputSchema: parsedMetadata.inputSchema || {},
+            similarity:
+              serverSimilarityBoost !== undefined
+                ? result.similarity * 0.8 + serverSimilarityBoost * 0.2
+                : result.similarity,
+            searchableText: result.embedding.text_content,
+          };
+        }
 
-      return {
-        serverName,
-        toolName,
-        description,
-        inputSchema: {},
-        similarity: result.similarity,
-        searchableText: textContent,
-      };
-    });
+        // Extract tool info from text_content if metadata is not available or parsing failed
+        const textContent = result.embedding?.text_content || '';
+
+        // Extract toolName (first word of text_content)
+        const toolNameMatch = textContent.match(/^(\S+)/);
+        const toolName = toolNameMatch ? toolNameMatch[1] : '';
+
+        // Extract serverName from toolName if it follows the pattern "serverName_toolPart"
+        const serverNameMatch = toolName.match(/^([^_]+)_/);
+        const serverName = serverNameMatch ? serverNameMatch[1] : 'unknown';
+
+        // Extract description (everything after the first word)
+        const description = textContent.replace(/^\S+\s*/, '').trim();
+        const serverSimilarityBoost = serverScoreMap.get(serverName);
+
+        return {
+          serverName,
+          toolName,
+          description,
+          inputSchema: {},
+          similarity:
+            serverSimilarityBoost !== undefined
+              ? result.similarity * 0.8 + serverSimilarityBoost * 0.2
+              : result.similarity,
+          searchableText: textContent,
+        };
+      })
+      .sort((a, b) => b.similarity - a.similarity);
   } catch (error) {
     console.error(
       'Error searching tools by vector',
@@ -1453,7 +1506,7 @@ export const getAllVectorizedTools = async (
 };
 
 /**
- * Remove tool embeddings for a server
+ * Remove tool and server embeddings for a server
  * @param serverName Server name
  */
 export const removeServerToolEmbeddings = async (serverName: string): Promise<void> => {
@@ -1477,9 +1530,9 @@ export const removeServerToolEmbeddings = async (serverName: string): Promise<vo
     )() as VectorEmbeddingRepository;
 
     const removedCount = await vectorRepository.deleteByServerName(serverName);
-    console.log('Removed tool embeddings', safeStringify({ serverName, removedCount }));
+    console.log('Removed server embeddings', safeStringify({ serverName, removedCount }));
   } catch (error) {
-    console.error('Error removing tool embeddings', safeStringify({ serverName, error }));
+    console.error('Error removing server embeddings', safeStringify({ serverName, error }));
   }
 };
 

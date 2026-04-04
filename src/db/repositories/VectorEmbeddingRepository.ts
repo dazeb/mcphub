@@ -211,6 +211,7 @@ export class VectorEmbeddingRepository extends BaseRepository<VectorEmbedding> {
       .where('ve.content_type = :ct', { ct: 'tool' })
       .andWhere("ve.content_id LIKE :prefix ESCAPE '\\'", { prefix })
       .andWhere('ve.model = :model', { model })
+      .andWhere('ve.embedding IS NOT NULL')
       .getMany();
 
     return rows.map((row) => ({
@@ -223,7 +224,7 @@ export class VectorEmbeddingRepository extends BaseRepository<VectorEmbedding> {
   }
 
   /**
-   * Delete tool embeddings for a specific server
+   * Delete tool and server embeddings for a specific server
    * @param serverName Server name
    * @returns Number of deleted embeddings
    */
@@ -235,8 +236,16 @@ export class VectorEmbeddingRepository extends BaseRepository<VectorEmbedding> {
         .createQueryBuilder()
         .delete()
         .from(VectorEmbedding)
-        .where('content_type = :contentType', { contentType: 'tool' })
-        .andWhere("content_id LIKE :prefix ESCAPE '\\'", { prefix })
+        .where(
+          `(content_type = :toolContentType AND content_id LIKE :prefix ESCAPE '\\')
+          OR (content_type = :serverContentType AND content_id = :serverName)`,
+          {
+            toolContentType: 'tool',
+            serverContentType: 'server',
+            prefix,
+            serverName,
+          },
+        )
         .execute();
 
       return result.affected || 0;
