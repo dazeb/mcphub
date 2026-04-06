@@ -10,7 +10,12 @@ interface GroupImportFormProps {
 interface ImportGroupConfig {
   name: string;
   description?: string;
-  servers?: string[] | Array<{ name: string; tools?: string[] | 'all' }>;
+  servers?: string[] | Array<{
+    name: string;
+    tools?: string[] | 'all';
+    prompts?: string[] | 'all';
+    resources?: string[] | 'all';
+  }>;
 }
 
 interface ImportJsonFormat {
@@ -35,11 +40,15 @@ const GroupImportForm: React.FC<GroupImportFormProps> = ({ onSuccess, onCancel }
       "servers": [
         {
           "name": "github-server",
-          "tools": ["create_issue", "list_repos"]
+          "tools": ["create_issue", "list_repos"],
+          "prompts": ["triage_prompt"],
+          "resources": ["resource://docs/repo-guide"]
         },
         {
           "name": "gitlab-server",
-          "tools": "all"
+          "tools": "all",
+          "prompts": "all",
+          "resources": "all"
         }
       ]
     }
@@ -48,7 +57,7 @@ const GroupImportForm: React.FC<GroupImportFormProps> = ({ onSuccess, onCancel }
 
 Supports:
 - Simple server list: ["server1", "server2"]
-- Advanced server config: [{"name": "server1", "tools": ["tool1", "tool2"]}]
+- Advanced server config: [{"name": "server1", "tools": ["tool1"], "prompts": ["prompt1"], "resources": ["resource://docs/guide"]}]
 - All groups will be imported in a single efficient batch operation.`;
 
   const parseAndValidateJson = (input: string): ImportJsonFormat | null => {
@@ -125,8 +134,29 @@ Supports:
     }
   };
 
+  const renderAllCapabilitiesLabel = (
+    key: 'previewAllTools' | 'previewAllPrompts' | 'previewAllResources',
+  ) => <span className="text-gray-500 ml-2">{t(`groups.${key}`)}</span>;
+
+  const renderCapabilityPreview = (
+    key: 'previewPrompts' | 'previewResources',
+    value: string[] | 'all' | undefined,
+  ) => {
+    if (!value || value === 'all') {
+      return null;
+    }
+
+    const items = Array.isArray(value) ? value.join(', ') : value;
+    return <span className="text-gray-500 ml-2">{t(`groups.${key}`, { items })}</span>;
+  };
+
   const renderServerList = (
-    servers?: string[] | Array<{ name: string; tools?: string[] | 'all' }>,
+    servers?: string[] | Array<{
+      name: string;
+      tools?: string[] | 'all';
+      prompts?: string[] | 'all';
+      resources?: string[] | 'all';
+    }>,
   ) => {
     if (!servers || servers.length === 0) {
       return <span className="text-gray-500">{t('groups.noServers')}</span>;
@@ -150,7 +180,11 @@ Supports:
                     ({Array.isArray(server.tools) ? server.tools.join(', ') : server.tools})
                   </span>
                 )}
-                {server.tools === 'all' && <span className="text-gray-500 ml-2">(all tools)</span>}
+                {server.tools === 'all' && renderAllCapabilitiesLabel('previewAllTools')}
+                {renderCapabilityPreview('previewPrompts', server.prompts)}
+                {server.prompts === 'all' && renderAllCapabilitiesLabel('previewAllPrompts')}
+                {renderCapabilityPreview('previewResources', server.resources)}
+                {server.resources === 'all' && renderAllCapabilitiesLabel('previewAllResources')}
               </div>
             );
           }
