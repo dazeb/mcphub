@@ -37,10 +37,49 @@ const upload = multer({
 
 export const uploadMiddleware = upload.single('mcpbFile');
 
+const MCPB_UPLOAD_DIR = path.join('data', 'uploads', 'mcpb');
+const MCPB_SERVER_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+const getMcpbUploadDir = (): string => path.join(process.cwd(), MCPB_UPLOAD_DIR);
+
+const validateMcpbServerName = (serverName: unknown): string => {
+  if (typeof serverName !== 'string') {
+    throw new Error('Invalid manifest: missing name');
+  }
+
+  const normalizedServerName = serverName.trim();
+  if (!normalizedServerName) {
+    throw new Error('Invalid manifest: missing name');
+  }
+
+  if (
+    !MCPB_SERVER_NAME_PATTERN.test(normalizedServerName) ||
+    normalizedServerName.includes('..') ||
+    normalizedServerName.includes(path.posix.sep) ||
+    normalizedServerName.includes(path.win32.sep)
+  ) {
+    throw new Error('Invalid manifest: name contains unsafe characters');
+  }
+
+  return normalizedServerName;
+};
+
+const resolveMcpbServerExtractDir = (baseDir: string, serverName: string): string => {
+  const resolvedBaseDir = path.resolve(baseDir);
+  const resolvedTargetDir = path.resolve(resolvedBaseDir, `server-${serverName}`);
+  const relativeTargetPath = path.relative(resolvedBaseDir, resolvedTargetDir);
+
+  if (relativeTargetPath.startsWith('..') || path.isAbsolute(relativeTargetPath)) {
+    throw new Error('Invalid manifest: name resolves outside upload directory');
+  }
+
+  return resolvedTargetDir;
+};
+
 // Clean up old MCPB server files when installing a new version
 const cleanupOldMcpbServer = (serverName: string): void => {
   try {
-    const uploadDir = path.join(process.cwd(), 'data/uploads/mcpb');
+    const uploadDir = getMcpbUploadDir();
     const serverPattern = `server-${serverName}`;
 
     if (fs.existsSync(uploadDir)) {
@@ -103,11 +142,13 @@ export const uploadMcpbFile = async (req: Request, res: Response): Promise<void>
         throw new Error('Invalid manifest: missing server configuration');
       }
 
+      const safeServerName = validateMcpbServerName(manifest.name);
+
       // Use server name as the final extract directory for automatic version management
-      const finalExtractDir = path.join(path.dirname(mcpbFilePath), `server-${manifest.name}`);
+      const finalExtractDir = resolveMcpbServerExtractDir(path.dirname(mcpbFilePath), safeServerName);
 
       // Clean up any existing version of this server
-      cleanupOldMcpbServer(manifest.name);
+      cleanupOldMcpbServer(safeServerName);
       if (!fs.existsSync(finalExtractDir)) {
         fs.mkdirSync(finalExtractDir, { recursive: true });
       }

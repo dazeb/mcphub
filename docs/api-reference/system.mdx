@@ -83,6 +83,11 @@ Upload a MCPB (MCP Bundle) file to import server configurations.
 - **Body**:
   - `mcpbFile` (file, required): The MCPB bundle file to upload.
 
+**Security notes:**
+
+- `manifest.json` must include a safe `name` value using only letters, numbers, `.`, `_`, and `-`.
+- Uploads are rejected if the manifest name contains path separators, `..`, or other unsafe path characters.
+
 **Example Request:**
 
 ```bash
