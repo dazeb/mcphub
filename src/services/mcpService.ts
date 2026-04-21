@@ -507,6 +507,42 @@ const summarizeTextPayloadForLogging = (text: string): Record<string, unknown> =
   wasSanitized: sanitizeStringForLogging(text) !== text || undefined,
 });
 
+const getHttpErrorStatusCode = (error: unknown): number | undefined => {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const err = error as {
+    code?: unknown;
+    status?: unknown;
+    response?: { status?: unknown };
+  };
+  const code = err.status ?? err.response?.status ?? err.code;
+  if (typeof code === 'number' && Number.isFinite(code)) {
+    return code;
+  }
+
+  if (typeof code === 'string') {
+    const parsedCode = Number.parseInt(code, 10);
+    return Number.isFinite(parsedCode) ? parsedCode : undefined;
+  }
+
+  return undefined;
+};
+
+const isRecoverableHttp4xxError = (error: unknown): boolean => {
+  const statusCode = getHttpErrorStatusCode(error);
+  if (statusCode !== undefined) {
+    return statusCode === 401 || statusCode === 404;
+  }
+
+  const message = typeof (error as { message?: unknown })?.message === 'string'
+    ? (error as { message: string }).message
+    : '';
+
+  return /Error POSTing to endpoint \(HTTP 40[14]/.test(message);
+};
+
 const summarizeContentItemForLogging = (item: unknown): Record<string, unknown> => {
   if (!item || typeof item !== 'object') {
     return { type: getValueTypeForLogging(item) };
@@ -770,8 +806,7 @@ const callToolWithReconnect = async (
       checkAuthError(result);
       return result;
     } catch (error: any) {
-      // Check if error message starts with "Error POSTing to endpoint (HTTP 40"
-      const isHttp40xError = error?.message?.startsWith?.('Error POSTing to endpoint (HTTP 40');
+      const isHttp40xError = isRecoverableHttp4xxError(error);
       // Only retry for StreamableHTTPClientTransport
       const isStreamableHttp = serverInfo.transport instanceof StreamableHTTPClientTransport;
       const isSSE = serverInfo.transport instanceof SSEClientTransport;
