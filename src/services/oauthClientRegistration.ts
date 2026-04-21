@@ -10,7 +10,9 @@
  */
 
 import * as client from 'openid-client';
+import { getSystemConfigDao } from '../dao/index.js';
 import { ServerConfig } from '../types/index.js';
+import { resolvePreferredRedirectUris } from '../utils/oauthRedirectUri.js';
 import {
   mutateOAuthSettings,
   persistClientCredentials,
@@ -250,6 +252,8 @@ export const registerClient = async (
 
     // Step 2: Prepare client metadata for registration
     const metadata = dynamicConfig?.metadata || {};
+    const systemConfig = await getSystemConfigDao().get();
+    const redirectUris = resolvePreferredRedirectUris(serverConfig, systemConfig?.install?.baseUrl);
 
     // Determine scopes: priority is metadata.scope > autoDetectedScopes > configured scopes > 'openid'
     let scopeValue: string;
@@ -265,7 +269,7 @@ export const registerClient = async (
 
     const clientMetadata: Partial<client.ClientMetadata> = {
       client_name: metadata.client_name || `MCPHub - ${serverName}`,
-      redirect_uris: metadata.redirect_uris || ['http://localhost:3000/oauth/callback'],
+      redirect_uris: redirectUris,
       grant_types: metadata.grant_types || ['authorization_code', 'refresh_token'],
       response_types: metadata.response_types || ['code'],
       token_endpoint_auth_method: metadata.token_endpoint_auth_method || 'client_secret_post',
