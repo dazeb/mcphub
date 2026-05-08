@@ -21,7 +21,8 @@ import {
   getServerByOAuthState,
   createTransportFromConfig,
 } from '../services/mcpService.js';
-import { getNameSeparator, loadSettings } from '../config/index.js';
+import { getNameSeparator, replaceEnvVars } from '../config/index.js';
+import { loadServerConfig } from '../services/oauthSettingsStore.js';
 import type { ServerInfo } from '../types/index.js';
 
 /**
@@ -253,10 +254,14 @@ export const handleOAuthCallback = async (req: Request, res: Response) => {
           serverName: serverInfo.name,
         });
 
-        // Refresh server configuration from disk to ensure we pick up newly saved tokens
-        const settings = loadSettings();
-        const storedConfig = settings.mcpServers?.[serverInfo.name];
-        const effectiveConfig = storedConfig || serverInfo.config;
+        // Refresh server configuration from storage (DB or file) to pick up newly saved tokens.
+        // loadServerConfig is DAO-backed and handles both DB and file modes, so a redundant
+        // loadSettings() call is not needed. Apply replaceEnvVars so fields like url/command
+        // have environment variable references expanded, consistent with initial server setup.
+        const freshConfig = await loadServerConfig(serverInfo.name);
+        const effectiveConfig = freshConfig
+          ? (replaceEnvVars(freshConfig as any) as typeof freshConfig)
+          : serverInfo.config;
 
         if (!effectiveConfig) {
           throw new Error(
