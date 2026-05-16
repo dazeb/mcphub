@@ -441,7 +441,8 @@ export const handleSseConnection = async (req: Request, res: Response): Promise<
   console.log(
     `New SSE connection established: ${transport.sessionId} with group: ${group || 'global'}${username ? ` for user: ${username}` : ''}`,
   );
-  await getMcpServer(transport.sessionId, group).connect(transport);
+  const server = await getMcpServer(transport.sessionId, group);
+  await server.connect(transport);
 };
 
 export const handleSseMessage = async (req: Request, res: Response): Promise<void> => {
@@ -522,7 +523,7 @@ async function createSessionWithId(
   );
 
   // Create a new server instance to ensure clean state
-  const server = getMcpServer(sessionId, group);
+  const server = await getMcpServer(sessionId, group);
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => sessionId, // Use the specified sessionId
@@ -599,7 +600,8 @@ async function createNewSession(
     deleteMcpServer(newSessionId);
   };
 
-  await getMcpServer(newSessionId, group).connect(transport);
+  const mcpServer = await getMcpServer(newSessionId, group);
+  await mcpServer.connect(transport);
   console.log(`[SESSION NEW] Successfully created new session ${newSessionId} in group: ${group}`);
   return transport;
 }
