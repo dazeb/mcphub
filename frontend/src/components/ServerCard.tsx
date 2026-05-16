@@ -301,7 +301,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
         {/* Main row */}
         <div
           className="grid items-center gap-3 px-4 py-3 cursor-pointer hover:bg-[var(--hub-surface-hover)] transition-colors"
-          style={{ gridTemplateColumns: 'minmax(220px,1.6fr) 130px 60px 90px 60px 100px 36px' }}
+          style={{ gridTemplateColumns: 'minmax(220px,1.6fr) 130px 90px 140px 80px 36px' }}
           onClick={() => setExpanded(!expanded)}
         >
           {/* Name + description */}
@@ -412,15 +412,6 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
             <ServerStatusDot status={server.status} enabled={server.enabled} onAuthClick={handleOAuth} />
           </div>
 
-          {/* Tools count */}
-          <div
-            className="hub-num hub-mono text-[12.5px]"
-            style={{ color: 'var(--hub-ink-2)' }}
-            title={`${enabledTools}/${totalTools} ${t('server.tools')}`}
-          >
-            {totalTools === 0 ? '0' : `${enabledTools}/${totalTools}`}
-          </div>
-
           {/* Transport */}
           <div>
             {server.config?.type ? (
@@ -430,13 +421,24 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
             )}
           </div>
 
-          {/* Prompts + resources count */}
+          {/* Tools / Prompts / Resources counts */}
           <div
-            className="hub-num hub-mono text-[12.5px]"
-            style={{ color: 'var(--hub-ink-2)' }}
-            title={`P:${enabledPrompts}/${totalPrompts} · R:${enabledResources}/${totalResources}`}
+            className="flex items-center gap-2.5 hub-num hub-mono"
+            style={{ color: 'var(--hub-ink-2)', fontSize: 12 }}
+            title={`T:${enabledTools}/${totalTools} · P:${enabledPrompts}/${totalPrompts} · R:${enabledResources}/${totalResources}`}
           >
-            {totalPrompts + totalResources > 0 ? `${totalPrompts}/${totalResources}` : '—'}
+            <span className="flex items-center gap-0.5">
+              <Wrench size={11} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+              <span>{totalTools === 0 ? '0' : `${enabledTools}/${totalTools}`}</span>
+            </span>
+            <span className="flex items-center gap-0.5">
+              <MessageSquare size={11} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+              <span>{totalPrompts === 0 ? '0' : `${enabledPrompts}/${totalPrompts}`}</span>
+            </span>
+            <span className="flex items-center gap-0.5">
+              <FileText size={11} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+              <span>{totalResources === 0 ? '0' : `${enabledResources}/${totalResources}`}</span>
+            </span>
           </div>
 
           {/* Toggle switch */}
@@ -522,67 +524,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
               padding: '14px 16px 16px 38px',
             }}
           >
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
-              <div>
-                <div className="hub-sect" style={{ marginBottom: 5 }}>
-                  {server.config?.type === 'sse' || server.config?.type === 'streamable-http' || server.config?.type === 'openapi'
-                    ? t('server.url')
-                    : t('server.command')}
-                </div>
-                {launchCmd ? (
-                  <div className="hub-endpoint">
-                    <div className="hub-endpoint-url" title={launchCmd}>
-                      {launchCmd}
-                    </div>
-                    <button
-                      type="button"
-                      className="hub-endpoint-copy"
-                      onClick={async (e) => {
-                        e.stopPropagation();
-                        const ok = await copyText(launchCmd);
-                        showToast(
-                          ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Failed',
-                          ok ? 'success' : 'error',
-                        );
-                      }}
-                      title={t('common.copy')}
-                    >
-                      <Copy size={13} />
-                    </button>
-                  </div>
-                ) : (
-                  <span style={{ color: 'var(--hub-ink-3)', fontSize: 12 }}>—</span>
-                )}
-              </div>
-              <div>
-                <div className="hub-sect" style={{ marginBottom: 5 }}>
-                  {t('pages.dashboard.endpoints') || 'Endpoint'}
-                </div>
-                <div className="hub-endpoint">
-                  <div className="hub-endpoint-label">/mcp/</div>
-                  <div className="hub-endpoint-url" title={serverEndpoint}>
-                    {server.name}
-                  </div>
-                  <button
-                    type="button"
-                    className="hub-endpoint-copy"
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      const ok = await copyText(serverEndpoint);
-                      showToast(
-                        ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Failed',
-                        ok ? 'success' : 'error',
-                      );
-                    }}
-                    title={t('common.copy')}
-                  >
-                    <Copy size={13} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Capability tabs */}
+            {/* Capability tabs + endpoint on same row */}
             <div className="flex items-center gap-1 mb-2">
               {[
                 {
@@ -612,7 +554,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
                   <button
                     key={tab.key}
                     onClick={() => setExpandedTab(active ? null : tab.key)}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] transition-colors"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] transition-colors hover:bg-[var(--hub-surface-hover)]"
                     style={{
                       background: active ? 'var(--hub-surface)' : 'transparent',
                       border: '1px solid ' + (active ? 'var(--hub-line)' : 'transparent'),
@@ -627,6 +569,31 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
                   </button>
                 );
               })}
+
+              {/* Endpoint inline, pushed to the right */}
+              <div className="ml-auto flex-shrink-0">
+                <div className="hub-endpoint" style={{ height: 26 }}>
+                  <div className="hub-endpoint-label">/mcp/</div>
+                  <div className="hub-endpoint-url" title={serverEndpoint} style={{ maxWidth: 200 }}>
+                    {server.name}
+                  </div>
+                  <button
+                    type="button"
+                    className="hub-endpoint-copy"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      const ok = await copyText(serverEndpoint);
+                      showToast(
+                        ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Failed',
+                        ok ? 'success' : 'error',
+                      );
+                    }}
+                    title={t('common.copy')}
+                  >
+                    <Copy size={12} />
+                  </button>
+                </div>
+              </div>
             </div>
 
             {expandedTab === 'tools' && server.tools && (
