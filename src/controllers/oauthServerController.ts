@@ -9,6 +9,7 @@ import { loadSettings } from '../config/index.js';
 import OAuth2Server from '@node-oauth/oauth2-server';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET } from '../config/jwt.js';
+import { resolveBetterAuthUser } from '../services/betterAuthSession.js';
 
 const { Request: OAuth2Request, Response: OAuth2Response } = OAuth2Server;
 
@@ -16,6 +17,36 @@ type AuthenticatedUser = {
   username: string;
   isAdmin?: boolean;
 };
+
+/**
+ * Bridge a Better Auth session cookie into req.user for the OAuth Server consent flow.
+ *
+ * The shared `auth` middleware is only mounted under /api/*, so /oauth/authorize never
+ * sees the Better Auth cookie that social-login (GitHub / Google) users carry. Without
+ * this helper, those users end up in a /login ↔ /oauth/authorize redirect loop (GET) or
+ * receive a 401 after clicking "Allow access" (POST). See issue #815.
+ *
+ * On success the resolved user is attached to req.user so the caller does not have to
+ * repeat that assignment at every call site.
+ */
+async function resolveBetterAuthUserForAuthorize(
+  req: Request,
+): Promise<AuthenticatedUser | null> {
+  try {
+    const user = await resolveBetterAuthUser(req);
+    if (user) {
+      const authenticatedUser: AuthenticatedUser = {
+        username: user.username,
+        isAdmin: !!user.isAdmin,
+      };
+      (req as any).user = authenticatedUser;
+      return authenticatedUser;
+    }
+  } catch (error) {
+    console.warn('Better Auth lookup failed in /oauth/authorize:', error);
+  }
+  return null;
+}
 
 /**
  * Attempt to attach a user to the request based on a JWT token present in header, query, or body.
@@ -274,6 +305,9 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
         user = tokenUser;
       }
     }
+    if (!user) {
+      user = await resolveBetterAuthUserForAuthorize(req);
+    }
 
     if (!user) {
       // Redirect to login page with return URL
@@ -364,7 +398,8 @@ export const postAuthorize = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Get authenticated user (JWT support for browser form submissions)
+    // Get authenticated user (JWT support for browser form submissions, plus
+    // Better Auth session cookie for social-login users — see #815).
     let user = (req as any).user;
     if (!user) {
       const tokenUser = resolveUserFromRequest(req);
@@ -372,6 +407,9 @@ export const postAuthorize = async (req: Request, res: Response): Promise<void> 
         (req as any).user = tokenUser;
         user = tokenUser;
       }
+    }
+    if (!user) {
+      user = await resolveBetterAuthUserForAuthorize(req);
     }
 
     if (!user) {
