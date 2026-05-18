@@ -301,7 +301,10 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
         {/* Main row */}
         <div
           className="grid items-center gap-3 px-4 py-3 cursor-pointer hover:bg-[var(--hub-surface-hover)] transition-colors"
-          style={{ gridTemplateColumns: 'minmax(220px,1.6fr) 130px 90px 140px 80px 36px' }}
+          style={{
+            gridTemplateColumns:
+              'minmax(220px,1.9fr) minmax(110px,0.9fr) minmax(120px,0.95fr) minmax(180px,1.1fr) 72px 36px',
+          }}
           onClick={() => setExpanded(!expanded)}
         >
           {/* Name + description */}
@@ -408,37 +411,71 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
           </div>
 
           {/* Status */}
-          <div>
+          <div className="min-w-0">
             <ServerStatusDot status={server.status} enabled={server.enabled} onAuthClick={handleOAuth} />
           </div>
 
           {/* Transport */}
-          <div>
+          <div className="min-w-0">
             {server.config?.type ? (
-              <span className="hub-tag">{transportLabel(t, server.config.type)}</span>
+              <span className="hub-tag" title={transportLabel(t, server.config.type) ?? undefined}>
+                {transportLabel(t, server.config.type)}
+              </span>
             ) : (
               <span style={{ color: 'var(--hub-ink-3)', fontSize: 12 }}>—</span>
             )}
           </div>
 
           {/* Tools / Prompts / Resources counts */}
-          <div
-            className="flex items-center gap-2.5 hub-num hub-mono"
-            style={{ color: 'var(--hub-ink-2)', fontSize: 12 }}
-            title={`T:${enabledTools}/${totalTools} · P:${enabledPrompts}/${totalPrompts} · R:${enabledResources}/${totalResources}`}
-          >
-            <span className="flex items-center gap-0.5">
-              <Wrench size={11} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
-              <span>{totalTools === 0 ? '0' : `${enabledTools}/${totalTools}`}</span>
-            </span>
-            <span className="flex items-center gap-0.5">
-              <MessageSquare size={11} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
-              <span>{totalPrompts === 0 ? '0' : `${enabledPrompts}/${totalPrompts}`}</span>
-            </span>
-            <span className="flex items-center gap-0.5">
-              <FileText size={11} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
-              <span>{totalResources === 0 ? '0' : `${enabledResources}/${totalResources}`}</span>
-            </span>
+          <div className="flex min-w-0 items-center gap-1.5">
+            {[
+              {
+                key: 'tools',
+                icon: Wrench,
+                total: totalTools,
+                enabled: enabledTools,
+                label: t('server.tools'),
+              },
+              {
+                key: 'prompts',
+                icon: MessageSquare,
+                total: totalPrompts,
+                enabled: enabledPrompts,
+                label: t('server.prompts'),
+              },
+              {
+                key: 'resources',
+                icon: FileText,
+                total: totalResources,
+                enabled: enabledResources,
+                label: t('nav.resources'),
+              },
+            ].map(({ key, icon: Icon, total, enabled: enabledCount, label }) => {
+              const isEmpty = total === 0;
+              return (
+                <span
+                  key={key}
+                  className="inline-flex items-center gap-1 hub-mono hub-num"
+                  title={`${label}: ${enabledCount}/${total}`}
+                  style={{
+                    padding: '2px 7px',
+                    borderRadius: 6,
+                    fontSize: 11.5,
+                    lineHeight: '16px',
+                    background: isEmpty ? 'transparent' : 'var(--hub-bg-2)',
+                    border: '1px solid',
+                    borderColor: isEmpty ? 'transparent' : 'var(--hub-line-2)',
+                    color: isEmpty ? 'var(--hub-ink-3)' : 'var(--hub-ink-2)',
+                  }}
+                >
+                  <Icon
+                    size={12}
+                    style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }}
+                  />
+                  <span>{isEmpty ? '0' : `${enabledCount}/${total}`}</span>
+                </span>
+              );
+            })}
           </div>
 
           {/* Toggle switch */}
@@ -525,7 +562,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
             }}
           >
             {/* Capability tabs + endpoint on same row */}
-            <div className="flex items-center gap-1 mb-2">
+            <div className="flex items-center gap-1 mb-2 flex-wrap">
               {[
                 {
                   key: 'tools' as const,
@@ -571,7 +608,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
               })}
 
               {/* Endpoint inline, pushed to the right */}
-              <div className="ml-auto flex-shrink-0">
+              <div className="ml-auto max-w-full flex-shrink-0">
                 <div className="hub-endpoint" style={{ height: 26 }}>
                   <div className="hub-endpoint-label">/mcp/</div>
                   <div className="hub-endpoint-url" title={serverEndpoint} style={{ maxWidth: 200 }}>
