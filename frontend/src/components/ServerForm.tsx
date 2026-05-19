@@ -79,6 +79,10 @@ const ServerForm = ({
     headers: [],
     passthroughHeaders:
       initialData?.config?.passthroughHeaders?.join(', ') || '',
+    visibility: (initialData?.config?.visibility ?? 'private') as
+      | 'private'
+      | 'group'
+      | 'public',
     options: {
       timeout:
         (initialData &&
@@ -302,6 +306,46 @@ const ServerForm = ({
             className="w-full py-2 px-3 form-input"
             placeholder={t('server.descriptionPlaceholder')}
           />
+        </div>
+
+        <div className="mb-4">
+          <label className="block text-sm font-medium mb-1.5 text-[var(--hub-ink-2)]" htmlFor="visibility">
+            {t('server.visibility', 'Visibility')}
+          </label>
+          <select
+            id="visibility"
+            name="visibility"
+            value={formData.visibility || 'private'}
+            onChange={(e) =>
+              setFormData((prev) => ({
+                ...prev,
+                visibility: e.target.value as 'private' | 'group' | 'public',
+              }))
+            }
+            className="w-full py-2 px-3 form-input"
+          >
+            <option value="private">
+              {t('server.visibilityPrivate', 'Private — only the owner and admins')}
+            </option>
+            {formData.visibility === 'group' && (
+              // 'group' is a reserved enum value; the filter doesn't yet honour it.
+              // Surface it as a disabled option so a server pre-set to 'group' (e.g.
+              // via direct DB update or a future user→group migration) renders
+              // intelligibly rather than silently falling back to 'private' in the UI.
+              <option value="group" disabled>
+                {t('server.visibilityGroup', 'Group (reserved — not yet implemented)')}
+              </option>
+            )}
+            <option value="public">
+              {t('server.visibilityPublic', 'Public — every authenticated user')}
+            </option>
+          </select>
+          <p className="text-xs text-gray-500 mt-1">
+            {t(
+              'server.visibilityDescription',
+              "Controls which non-admin users see this server in tools/list. Admins always see all servers regardless of this setting.",
+            )}
+          </p>
         </div>
 
         <div className="mb-4">
