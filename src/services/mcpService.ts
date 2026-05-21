@@ -625,6 +625,33 @@ const summarizeToolRequestForLogging = (params: any): Record<string, unknown> =>
   arguments: summarizeArgumentsForLogging(params?.arguments),
 });
 
+const getActivityInputFromToolRequest = (request: any): unknown => {
+  if (request?.params?.name === 'call_tool') {
+    return request?.params?.arguments?.arguments;
+  }
+
+  return request?.params?.arguments;
+};
+
+const getActivityToolNameFromRequest = (request: any): string => {
+  if (request?.params?.name === 'call_tool') {
+    const nestedToolName = request?.params?.arguments?.toolName;
+    return typeof nestedToolName === 'string' ? nestedToolName : 'call_tool';
+  }
+
+  return typeof request?.params?.name === 'string' ? request.params.name : 'unknown';
+};
+
+const stripToolServerPrefix = (toolName: string, serverName?: string): string => {
+  if (!serverName) {
+    return toolName;
+  }
+
+  const separator = getNameSeparator();
+  const prefix = `${serverName}${separator}`;
+  return toolName.startsWith(prefix) ? toolName.substring(prefix.length) : toolName;
+};
+
 const summarizePromptForLogging = (prompt: unknown): Record<string, unknown> => {
   if (!prompt || typeof prompt !== 'object') {
     return { type: getValueTypeForLogging(prompt) };
@@ -1702,6 +1729,7 @@ export const handleCallToolRequest = async (request: any, extra: any) => {
     requestContextService.getGroupContext() || extra?.group || getGroup(sessionId) || undefined;
   const keyId = bearerKeyContext.keyId || extra?.keyId || undefined;
   const keyName = bearerKeyContext.keyName || extra?.keyName || undefined;
+  const sourceIp = requestContextService.getRequestContext()?.remoteAddress || undefined;
 
   try {
     // Special handling for smart routing tools
@@ -1810,11 +1838,12 @@ export const handleCallToolRequest = async (request: any, extra: any) => {
           tool: cleanToolName,
           duration,
           status: 'success',
-          input: summarizeArgumentsForLogging(finalArgs),
-          output: summarizeToolResultForLogging(result),
+          input: finalArgs,
+          output: result,
           group,
           keyId,
           keyName,
+          sourceIp,
         });
 
         return {
@@ -1869,11 +1898,12 @@ export const handleCallToolRequest = async (request: any, extra: any) => {
         tool: cleanToolName,
         duration,
         status: result.isError ? 'error' : 'success',
-        input: summarizeArgumentsForLogging(finalArgs),
-        output: summarizeToolResultForLogging(result),
+        input: finalArgs,
+        output: result,
         group,
         keyId,
         keyName,
+        sourceIp,
         errorMessage: result.isError ? 'Tool returned error response' : undefined,
       });
 
@@ -1950,11 +1980,12 @@ export const handleCallToolRequest = async (request: any, extra: any) => {
         tool: cleanToolName,
         duration,
         status: 'success',
-        input: summarizeArgumentsForLogging(request.params.arguments),
-        output: summarizeToolResultForLogging(result),
+        input: request.params.arguments,
+        output: result,
         group,
         keyId,
         keyName,
+        sourceIp,
       });
 
       return {
@@ -1996,12 +2027,13 @@ export const handleCallToolRequest = async (request: any, extra: any) => {
       tool: cleanToolName,
       duration,
       status: result.isError ? 'error' : 'success',
-        input: summarizeArgumentsForLogging(request.params.arguments),
-        output: summarizeToolResultForLogging(result),
+      input: request.params.arguments,
+      output: result,
       group,
       keyId,
       keyName,
-        errorMessage: result.isError ? 'Tool returned error response' : undefined,
+      sourceIp,
+      errorMessage: result.isError ? 'Tool returned error response' : undefined,
     });
 
     return result;
@@ -2010,18 +2042,22 @@ export const handleCallToolRequest = async (request: any, extra: any) => {
 
     // Log error activity
     const duration = Date.now() - startTime;
-    const toolName = request.params?.name || 'unknown';
-    const serverInfo = getServerByTool(toolName);
+    const activityToolName = getActivityToolNameFromRequest(request);
+    const serverInfo =
+      (typeof extra?.server === 'string' ? getServerByName(extra.server) : undefined) ||
+      getServerByTool(activityToolName);
+    const cleanToolName = stripToolServerPrefix(activityToolName, serverInfo?.name);
 
     await activityLogger.logToolCall({
       server: serverInfo?.name || 'unknown',
-      tool: toolName,
+      tool: cleanToolName,
       duration,
       status: 'error',
-      input: summarizeArgumentsForLogging(request.params?.arguments),
+      input: getActivityInputFromToolRequest(request),
       group,
       keyId,
       keyName,
+      sourceIp,
       errorMessage: formatErrorForLogging(error),
     });
 
