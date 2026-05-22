@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Request } from 'express';
+import ipaddr from 'ipaddr.js';
 
 /**
  * Request context interface for MCP request handling
@@ -13,6 +14,26 @@ export interface RequestContext {
   keyId?: string;
   keyName?: string;
 }
+
+const normalizeRemoteAddress = (remoteAddress?: string): string | undefined => {
+  if (!remoteAddress) {
+    return undefined;
+  }
+
+  const trimmedRemoteAddress = remoteAddress.trim();
+  if (!trimmedRemoteAddress) {
+    return undefined;
+  }
+
+  if (ipaddr.isValid(trimmedRemoteAddress)) {
+    const parsedAddress = ipaddr.parse(trimmedRemoteAddress);
+    if (parsedAddress instanceof ipaddr.IPv6 && parsedAddress.isIPv4MappedAddress()) {
+      return parsedAddress.toIPv4Address().toString();
+    }
+  }
+
+  return trimmedRemoteAddress;
+};
 
 /**
  * Service for managing request context during MCP request processing
@@ -36,7 +57,7 @@ export class RequestContextService {
       headers: req.headers,
       sessionId: (req.headers['mcp-session-id'] as string) || undefined,
       userAgent: req.headers['user-agent'] as string,
-      remoteAddress: req.ip || req.socket?.remoteAddress,
+      remoteAddress: normalizeRemoteAddress(req.ip || req.socket?.remoteAddress),
     };
   }
 
@@ -44,6 +65,7 @@ export class RequestContextService {
     return {
       ...context,
       headers: { ...context.headers },
+      remoteAddress: normalizeRemoteAddress(context.remoteAddress),
     };
   }
 
