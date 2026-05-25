@@ -190,6 +190,10 @@ jest.mock('../../src/controllers/activityController.js', () => ({
   deleteOldActivities: routeHandler,
 }));
 
+jest.mock('../../src/controllers/hostedInternalController.js', () => ({
+  receiveHostedInternalEvent: routeHandler,
+}));
+
 jest.mock('../../src/controllers/templateController.js', () => ({
   exportConfigTemplate: routeHandler,
   exportGroupAsTemplate: routeHandler,
@@ -204,7 +208,10 @@ jest.mock('../../src/services/betterAuthConfig.js', () => ({
   getBetterAuthRuntimeConfig: () => ({ enabled: false, basePath: '/better-auth' }),
 }));
 
-import { authenticatedRouteRateLimiter } from '../../src/utils/rateLimit.js';
+import {
+  authenticatedRouteRateLimiter,
+  hostedInternalEventRateLimiter,
+} from '../../src/utils/rateLimit.js';
 import { initRoutes } from '../../src/routes/index.js';
 
 type ExpressLayer = {
@@ -213,6 +220,7 @@ type ExpressLayer = {
   route?: {
     path: string;
     methods: Record<string, boolean>;
+    stack?: ExpressLayer[];
   };
 };
 
@@ -222,7 +230,9 @@ type ExpressLayerHandle = {
 
 const findMountedRouter = (app: express.Application): ExpressLayerHandle => {
   const appRouter = (app as express.Application & { _router?: { stack?: ExpressLayer[] } })._router;
-  const routerLayer = appRouter?.stack?.find((layer) => layer.name === 'router' && layer.handle?.stack);
+  const routerLayer = appRouter?.stack?.find(
+    (layer) => layer.name === 'router' && layer.handle?.stack,
+  );
 
   if (!routerLayer?.handle?.stack) {
     throw new Error('Expected initRoutes to mount an API router');
@@ -240,6 +250,18 @@ const routerContainsRoute = (
     (layer) => layer.route?.path === path && Boolean(layer.route.methods[method.toLowerCase()]),
   ) ?? false;
 
+const findAppRoute = (
+  app: express.Application,
+  method: string,
+  path: string,
+): ExpressLayer | undefined => {
+  const appRouter = (app as express.Application & { _router?: { stack?: ExpressLayer[] } })._router;
+
+  return appRouter?.stack?.find(
+    (layer) => layer.route?.path === path && Boolean(layer.route.methods[method.toLowerCase()]),
+  );
+};
+
 describe('initRoutes authenticated API rate limiting', () => {
   it('mounts sensitive API routes behind the authenticated rate limiter', async () => {
     const app = express();
@@ -253,11 +275,29 @@ describe('initRoutes authenticated API rate limiting', () => {
 
     expect(protectedRouter).toBeDefined();
     const authenticatedLimiterIndex =
-      protectedRouter?.stack?.findIndex((layer) => layer.handle === authenticatedRouteRateLimiter) ?? -1;
+      protectedRouter?.stack?.findIndex(
+        (layer) => layer.handle === authenticatedRouteRateLimiter,
+      ) ?? -1;
 
     expect(authenticatedLimiterIndex).toBeGreaterThanOrEqual(0);
     expect(routerContainsRoute(protectedRouter!, 'get', '/servers/:name')).toBe(true);
     expect(routerContainsRoute(protectedRouter!, 'put', '/oauth/clients/:clientId')).toBe(true);
     expect(routerContainsRoute(protectedRouter!, 'delete', '/oauth/clients/:clientId')).toBe(true);
+  });
+
+  it('mounts the hosted internal webhook ingress behind its dedicated rate limiter', async () => {
+    const app = express();
+
+    await initRoutes(app);
+
+    const internalRoute = findAppRoute(app, 'post', '/internal/v1/events');
+
+    expect(internalRoute).toBeDefined();
+    expect(internalRoute?.route?.stack?.map((layer) => layer.handle)).toContain(
+      hostedInternalEventRateLimiter,
+    );
+    expect(internalRoute?.route?.stack?.map((layer) => layer.handle)).not.toContain(
+      authenticatedRouteRateLimiter,
+    );
   });
 });

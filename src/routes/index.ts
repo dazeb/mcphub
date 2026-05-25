@@ -141,6 +141,7 @@ import {
   getActivityFilterOptions,
   deleteOldActivities,
 } from '../controllers/activityController.js';
+import { receiveHostedInternalEvent } from '../controllers/hostedInternalController.js';
 import {
   exportConfigTemplate,
   exportGroupAsTemplate,
@@ -148,7 +149,11 @@ import {
 } from '../controllers/templateController.js';
 import { auth } from '../middlewares/auth.js';
 import { getBetterAuthRuntimeConfig } from '../services/betterAuthConfig.js';
-import { authenticatedRouteRateLimiter, templateRateLimiter } from '../utils/rateLimit.js';
+import {
+  authenticatedRouteRateLimiter,
+  hostedInternalEventRateLimiter,
+  templateRateLimiter,
+} from '../utils/rateLimit.js';
 
 const router = express.Router();
 const authenticatedRouter = express.Router();
@@ -173,6 +178,9 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
 
   // Health check endpoint (no auth required, accessible at /health)
   app.get('/health', healthCheck);
+
+  // Hosted data-plane webhook ingress. HMAC-authenticated by INTERNAL_API_SECRET.
+  app.post('/internal/v1/events', hostedInternalEventRateLimiter, receiveHostedInternalEvent);
 
   // OAuth callback endpoint (no auth required, public callback URL)
   app.get('/oauth/callback', handleOAuthCallback);
@@ -248,10 +256,7 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   // New routes for server configurations and tool management in groups
   authenticatedRouter.get('/groups/:id/server-configs', getGroupServerConfigs);
   authenticatedRouter.get('/groups/:id/server-configs/:serverName', getGroupServerConfig);
-  authenticatedRouter.put(
-    '/groups/:id/server-configs/:serverName/tools',
-    updateGroupServerTools,
-  );
+  authenticatedRouter.put('/groups/:id/server-configs/:serverName/tools', updateGroupServerTools);
 
   // User management routes (admin only)
   authenticatedRouter.get('/users', getUsers);
