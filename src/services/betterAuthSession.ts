@@ -1,17 +1,9 @@
 import crypto from 'crypto';
 import { Request } from 'express';
-import { createUser, findUserByUsername } from '../models/User.js';
+import { createUser, findUserByUsername, findUserByEmail } from '../models/User.js';
 import { IUser } from '../types/index.js';
 import { getBetterAuthRuntimeConfig } from './betterAuthConfig.js';
-
-const buildUsernameFromSession = (session: any): string | null => {
-  const user = session?.user;
-  if (!user) {
-    return null;
-  }
-
-  return user.email || user.name || user.id || null;
-};
+import { getUserDao } from '../dao/index.js';
 
 export const getBetterAuthSession = async (req: Request): Promise<any | null> => {
   if (!(await getBetterAuthRuntimeConfig()).enabled) {
@@ -38,22 +30,57 @@ export const resolveBetterAuthUser = async (req: Request): Promise<IUser | null>
     return null;
   }
 
-  const username = buildUsernameFromSession(session);
+  const email = session.user?.email;
+
+  // Priority 1: Email match
+  if (email) {
+    const emailMatch = await findUserByEmail(email);
+    if (emailMatch) {
+      return emailMatch;
+    }
+  }
+
+  // Priority 2: Username match (backward compatibility)
+  const username = email || session.user?.name || session.user?.id;
+  if (username) {
+    const usernameMatch = await findUserByUsername(username);
+    if (usernameMatch) {
+      // Backfill email for existing users to enable Priority 1/2 on subsequent logins
+      if (email && !usernameMatch.email) {
+        try {
+          const userDao = getUserDao();
+          await userDao.update(usernameMatch.username, { email });
+        } catch (backfillError) {
+          console.warn('Email backfill failed (non-critical):', backfillError);
+        }
+      }
+      return usernameMatch;
+    }
+  }
+
+  // Priority 3: Create new user (unless disabled)
   if (!username) {
     return null;
   }
 
-  const existingUser = await findUserByUsername(username);
-  if (existingUser) {
-    return existingUser;
+  const runtimeConfig = await getBetterAuthRuntimeConfig();
+  if (runtimeConfig.disableAutoCreate) {
+    console.warn(`SSO auto-creation disabled: user "${username}" not found in system`);
+    return null;
   }
 
   const generatedPassword = crypto.randomUUID();
-  const createdUser = await createUser({ username, password: generatedPassword, isAdmin: false });
+  const createdUser = await createUser({
+    username,
+    password: generatedPassword,
+    isAdmin: false,
+    email: email || undefined,
+  });
   if (createdUser) {
     return createdUser;
   }
 
+  // Handle race condition: another request created the user between our check and create
   const refreshedUser = await findUserByUsername(username);
   return refreshedUser || null;
 };
