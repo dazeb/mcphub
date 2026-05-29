@@ -10,7 +10,8 @@ export interface IUser {
   username: string;
   password: string;
   isAdmin?: boolean;
-  email?: string;
+  email?: string | null;
+  ssoUserId?: string | null;
 }
 
 // Group interface for server grouping
