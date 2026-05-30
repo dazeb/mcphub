@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ChevronRight,
@@ -13,6 +13,7 @@ import {
   X,
   Edit3,
   Trash2,
+  type LucideIcon,
 } from 'lucide-react';
 import { Server } from '@/types';
 import { ServerStatusDot } from '@/components/ui/StatusDot';
@@ -24,15 +25,78 @@ import { useToast } from '@/contexts/ToastContext';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useAuth } from '@/contexts/AuthContext';
 import { canManageServer } from '@/utils/serverPermissions';
+import {
+  getServerVisibilityDisplay,
+  getServerVisibilityOptions,
+  normalizeServerVisibility,
+} from '@/utils/serverVisibility';
 
 interface ServerCardProps {
   server: Server;
   onRemove: (serverName: string) => void;
   onEdit: (server: Server) => void;
   onToggle?: (server: Server, enabled: boolean) => Promise<boolean>;
+  onVisibilityChange?: (server: Server, visibility: 'private' | 'group' | 'public') => Promise<boolean>;
   onRefresh?: () => void;
   onReload?: (server: Server) => Promise<boolean>;
 }
+
+type CapabilityTabKey = 'tools' | 'prompts' | 'resources';
+
+type CapabilitySummary = {
+  key: CapabilityTabKey;
+  icon: LucideIcon;
+  label: string;
+  total: number;
+  enabled: number;
+};
+
+interface LoadingControlProps {
+  isLoading: boolean;
+  children: ReactNode;
+  className?: string;
+  overlayStyle?: CSSProperties;
+  spinnerSize?: number;
+}
+
+const LoadingControl = ({
+  isLoading,
+  children,
+  className,
+  overlayStyle,
+  spinnerSize = 12,
+}: LoadingControlProps) => (
+  <div className={className ? `relative flex items-center ${className}` : 'relative flex items-center'} aria-busy={isLoading}>
+    <div
+      className="flex w-full items-center justify-center"
+      style={{
+        visibility: isLoading ? 'hidden' : 'visible',
+        pointerEvents: isLoading ? 'none' : 'auto',
+      }}
+    >
+      {children}
+    </div>
+    {isLoading && (
+      <div
+        className="pointer-events-none absolute inset-0 flex items-center justify-center"
+        style={{
+          background: 'var(--hub-surface)',
+          border: '1px solid var(--hub-line-2)',
+          borderRadius: 8,
+          ...overlayStyle,
+        }}
+      >
+        <RefreshCw size={spinnerSize} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+      </div>
+    )}
+  </div>
+);
+
+const CapabilityIcon = ({ icon: Icon }: { icon: LucideIcon }) => (
+  <span className="hub-server-capability-icon" aria-hidden="true">
+    <Icon size={11.5} strokeWidth={1.9} className="block" />
+  </span>
+);
 
 const transportLabel = (t: any, type?: string) => {
   if (!type) return null;
@@ -43,7 +107,15 @@ const transportLabel = (t: any, type?: string) => {
   return type;
 };
 
-const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }: ServerCardProps) => {
+const ServerCard = ({
+  server,
+  onRemove,
+  onEdit,
+  onToggle,
+  onVisibilityChange,
+  onRefresh,
+  onReload,
+}: ServerCardProps) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { exportMCPSettings, installConfig } = useSettingsData();
@@ -54,6 +126,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
   const [expandedTab, setExpandedTab] = useState<'tools' | 'prompts' | 'resources' | null>(null);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [isToggling, setIsToggling] = useState(false);
+  const [isUpdatingVisibility, setIsUpdatingVisibility] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showErrorPopover, setShowErrorPopover] = useState(false);
@@ -103,6 +176,23 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
       }
     } finally {
       setIsReloading(false);
+    }
+  };
+
+  const handleVisibilityChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    e.stopPropagation();
+    if (!canManage || isUpdatingVisibility || !onVisibilityChange) return;
+
+    const nextVisibility = e.target.value as 'private' | 'group' | 'public';
+    if (nextVisibility === normalizeServerVisibility(server.visibility ?? server.config?.visibility)) {
+      return;
+    }
+
+    setIsUpdatingVisibility(true);
+    try {
+      await onVisibilityChange(server, nextVisibility);
+    } finally {
+      setIsUpdatingVisibility(false);
     }
   };
 
@@ -296,6 +386,35 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
   const enabled = server.enabled !== false;
   const canManage = canManageServer(server, auth.user);
   const serverEndpoint = `${baseUrl}/mcp/${server.name}`;
+  const translateVisibility = (key: string, options?: { defaultValue?: string }) => t(key, options);
+  const visibility = getServerVisibilityDisplay(
+    translateVisibility,
+    server.visibility ?? server.config?.visibility,
+  );
+  const visibilityOptions = getServerVisibilityOptions(translateVisibility, visibility.value);
+  const capabilitySummaries: CapabilitySummary[] = [
+    {
+      key: 'tools',
+      icon: Wrench,
+      total: totalTools,
+      enabled: enabledTools,
+      label: t('server.tools'),
+    },
+    {
+      key: 'prompts',
+      icon: MessageSquare,
+      total: totalPrompts,
+      enabled: enabledPrompts,
+      label: t('server.prompts'),
+    },
+    {
+      key: 'resources',
+      icon: FileText,
+      total: totalResources,
+      enabled: enabledResources,
+      label: t('nav.resources'),
+    },
+  ];
 
   return (
     <>
@@ -305,11 +424,7 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
       >
         {/* Main row */}
         <div
-          className="grid items-center gap-3 px-4 py-3 cursor-pointer hover:bg-[var(--hub-surface-hover)] transition-colors"
-          style={{
-            gridTemplateColumns:
-              'minmax(220px,1.9fr) minmax(110px,0.9fr) minmax(120px,0.95fr) minmax(180px,1.1fr) 72px 36px',
-          }}
+          className="hub-server-card-row cursor-pointer px-4 py-3 transition-colors hover:bg-[var(--hub-surface-hover)]"
           onClick={() => setExpanded(!expanded)}
         >
           {/* Name + description */}
@@ -417,13 +532,21 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
 
           {/* Status */}
           <div className="min-w-0">
-            <ServerStatusDot status={server.status} enabled={server.enabled} onAuthClick={handleOAuth} />
+            <ServerStatusDot
+              status={server.status}
+              enabled={server.enabled}
+              onAuthClick={handleOAuth}
+              className="hub-server-card-status"
+            />
           </div>
 
           {/* Transport */}
           <div className="min-w-0">
             {server.config?.type ? (
-              <span className="hub-tag" title={transportLabel(t, server.config.type) ?? undefined}>
+              <span
+                className="hub-tag hub-server-card-transport-tag"
+                title={transportLabel(t, server.config.type) ?? undefined}
+              >
                 {transportLabel(t, server.config.type)}
               </span>
             ) : (
@@ -431,67 +554,77 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
             )}
           </div>
 
-          {/* Tools / Prompts / Resources counts */}
-          <div className="flex min-w-0 items-center gap-1.5">
-            {[
-              {
-                key: 'tools',
-                icon: Wrench,
-                total: totalTools,
-                enabled: enabledTools,
-                label: t('server.tools'),
-              },
-              {
-                key: 'prompts',
-                icon: MessageSquare,
-                total: totalPrompts,
-                enabled: enabledPrompts,
-                label: t('server.prompts'),
-              },
-              {
-                key: 'resources',
-                icon: FileText,
-                total: totalResources,
-                enabled: enabledResources,
-                label: t('nav.resources'),
-              },
-            ].map(({ key, icon: Icon, total, enabled: enabledCount, label }) => {
-              const isEmpty = total === 0;
-              return (
-                <span
-                  key={key}
-                  className="inline-flex items-center gap-1 hub-mono hub-num"
-                  title={`${label}: ${enabledCount}/${total}`}
-                  style={{
-                    padding: '2px 7px',
-                    borderRadius: 6,
-                    fontSize: 11.5,
-                    lineHeight: '16px',
-                    background: isEmpty ? 'transparent' : 'var(--hub-bg-2)',
-                    border: '1px solid',
-                    borderColor: isEmpty ? 'transparent' : 'var(--hub-line-2)',
-                    color: isEmpty ? 'var(--hub-ink-3)' : 'var(--hub-ink-2)',
-                  }}
+          <div className="hub-server-card-visibility min-w-0" onClick={(e) => e.stopPropagation()}>
+            {canManage && onVisibilityChange ? (
+              <LoadingControl
+                isLoading={isUpdatingVisibility}
+                className="w-full"
+                overlayStyle={{ borderRadius: 6 }}
+              >
+                <select
+                  value={visibility.value}
+                  onChange={handleVisibilityChange}
+                  disabled={isUpdatingVisibility}
+                  className="hub-server-card-select w-full rounded-md border px-2 py-1 text-[11.5px] bg-[var(--hub-surface)] text-[var(--hub-ink)]"
+                  style={{ borderColor: 'var(--hub-line-2)' }}
+                  aria-label={t('server.visibility', 'Visibility')}
+                  title={visibility.longLabel}
                 >
-                  <Icon
-                    size={12}
-                    style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }}
-                  />
-                  <span>{isEmpty ? '0' : `${enabledCount}/${total}`}</span>
-                </span>
-              );
-            })}
+                  {visibilityOptions.map((option) => (
+                    <option key={option.value} value={option.value} disabled={option.disabled}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </LoadingControl>
+            ) : (
+              <span
+                className={`hub-server-card-visibility-badge inline-flex items-center rounded-md border px-2 py-0.5 text-[11.5px] ${visibility.className}`}
+                title={visibility.longLabel}
+              >
+                {visibility.shortLabel}
+              </span>
+            )}
           </div>
+
+          {/* Tools / Prompts / Resources counts */}
+          {capabilitySummaries.map(({ key, icon: Icon, total, enabled: enabledCount, label }) => {
+            const isEmpty = total === 0;
+            return (
+              <span
+                key={key}
+                className={`hub-server-capability-stat hub-mono hub-num ${isEmpty ? 'is-empty' : ''}`}
+                title={`${label}: ${enabledCount}/${total}`}
+              >
+                <span className="text-[var(--hub-ink-3)]">
+                  <CapabilityIcon icon={Icon} />
+                </span>
+                <span className="hub-server-capability-value">
+                  {isEmpty ? '0' : `${enabledCount}/${total}`}
+                </span>
+              </span>
+            );
+          })}
 
           {/* Toggle switch */}
           <div className="flex items-center justify-center">
-            <button
-              type="button"
-              className={'hub-switch' + (enabled ? ' on' : '')}
-              onClick={handleToggle}
-              disabled={isToggling || !canManage}
-              aria-label={enabled ? t('server.disable') : t('server.enable')}
-            />
+            <LoadingControl
+              isLoading={isToggling}
+              className="h-[18px] w-[30px]"
+              overlayStyle={{
+                borderRadius: 999,
+                background: 'var(--hub-bg-2)',
+              }}
+              spinnerSize={10}
+            >
+              <button
+                type="button"
+                className={'hub-switch' + (enabled ? ' on' : '')}
+                onClick={handleToggle}
+                disabled={isToggling || !canManage}
+                aria-label={enabled ? t('server.disable') : t('server.enable')}
+              />
+            </LoadingControl>
           </div>
 
           {/* Menu */}
@@ -570,30 +703,9 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
           >
             {/* Capability tabs + endpoint on same row */}
             <div className="flex items-center gap-1 mb-2 flex-wrap">
-              {[
-                {
-                  key: 'tools' as const,
-                  icon: <Wrench size={12} />,
-                  label: t('server.tools'),
-                  count: totalTools,
-                  enabled: enabledTools,
-                },
-                {
-                  key: 'prompts' as const,
-                  icon: <MessageSquare size={12} />,
-                  label: t('server.prompts'),
-                  count: totalPrompts,
-                  enabled: enabledPrompts,
-                },
-                {
-                  key: 'resources' as const,
-                  icon: <FileText size={12} />,
-                  label: t('nav.resources'),
-                  count: totalResources,
-                  enabled: enabledResources,
-                },
-              ].map((tab) => {
+              {capabilitySummaries.map((tab) => {
                 const active = expandedTab === tab.key;
+                const Icon = tab.icon;
                 return (
                   <button
                     key={tab.key}
@@ -605,10 +717,10 @@ const ServerCard = ({ server, onRemove, onEdit, onToggle, onRefresh, onReload }:
                       color: active ? 'var(--hub-ink)' : 'var(--hub-ink-2)',
                     }}
                   >
-                    {tab.icon}
+                    <CapabilityIcon icon={Icon} />
                     <span>{tab.label}</span>
                     <span className="hub-mono hub-num" style={{ color: 'var(--hub-ink-3)', fontSize: 11 }}>
-                      {tab.count === 0 ? '0' : `${tab.enabled}/${tab.count}`}
+                      {tab.total === 0 ? '0' : `${tab.enabled}/${tab.total}`}
                     </span>
                   </button>
                 );

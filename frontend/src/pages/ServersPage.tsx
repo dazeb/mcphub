@@ -31,6 +31,7 @@ const ServersPage: React.FC = () => {
     handleServerEdit,
     handleServerRemove,
     handleServerToggle,
+    handleServerVisibilityChange,
     handleServerReload,
     triggerRefresh,
   } = useServerData({ refreshOnMount: true });
@@ -224,6 +225,7 @@ const ServersPage: React.FC = () => {
                 onRemove={handleServerRemove}
                 onEdit={handleEditClick}
                 onToggle={handleServerToggle}
+                onVisibilityChange={handleServerVisibilityChange}
                 onRefresh={triggerRefresh}
                 onReload={handleServerReload}
               />
