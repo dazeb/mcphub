@@ -169,6 +169,7 @@ Available servers: ${serversList}`,
             },
             arguments: {
               type: 'object',
+              additionalProperties: true,
               description:
                 'The arguments to pass to the tool based on its inputSchema from describe_tool (optional if tool requires no arguments)',
             },
@@ -228,6 +229,7 @@ Available servers: ${serversList}`,
             },
             arguments: {
               type: 'object',
+              additionalProperties: true,
               description:
                 'The arguments to pass to the tool based on its inputSchema (optional if tool requires no arguments)',
             },
