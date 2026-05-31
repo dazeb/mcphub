@@ -156,6 +156,7 @@ import {
   authenticatedRouteRateLimiter,
   hostedInternalEventRateLimiter,
   templateRateLimiter,
+  mcpConnectionRateLimiter,
 } from '../utils/rateLimit.js';
 
 const router = express.Router();
@@ -194,12 +195,12 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   app.get('/oauth/callback', handleOAuthCallback);
 
   // OAuth Authorization Server endpoints (no auth required for OAuth flow)
-  app.get('/oauth/authorize', getAuthorize);
-  app.post('/oauth/authorize', express.urlencoded({ extended: true }), postAuthorize);
-  app.post('/oauth/token', express.urlencoded({ extended: true }), postToken); // Public endpoint for token exchange
-  app.get('/oauth/userinfo', getUserInfo); // Validates OAuth token
-  app.get('/.well-known/oauth-authorization-server', getMetadata); // Public metadata endpoint
-  app.get('/.well-known/oauth-protected-resource', getProtectedResourceMetadata); // Public protected resource metadata
+  app.get('/oauth/authorize', mcpConnectionRateLimiter, getAuthorize);
+  app.post('/oauth/authorize', express.urlencoded({ extended: true }), mcpConnectionRateLimiter, postAuthorize);
+  app.post('/oauth/token', express.urlencoded({ extended: true }), mcpConnectionRateLimiter, postToken); // Public endpoint for token exchange
+  app.get('/oauth/userinfo', mcpConnectionRateLimiter, getUserInfo); // Validates OAuth token
+  app.get('/.well-known/oauth-authorization-server', mcpConnectionRateLimiter, getMetadata); // Public metadata endpoint
+  app.get('/.well-known/oauth-protected-resource', mcpConnectionRateLimiter, getProtectedResourceMetadata); // Public protected resource metadata
 
   // RFC 7591 Dynamic Client Registration endpoints (public for registration)
   app.post('/oauth/register', registerClient); // Register new OAuth client

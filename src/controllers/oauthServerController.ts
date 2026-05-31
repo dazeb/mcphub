@@ -10,6 +10,7 @@ import OAuth2Server from '@node-oauth/oauth2-server';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET } from '../config/jwt.js';
 import { resolveBetterAuthUser } from '../services/betterAuthSession.js';
+import { cloneDefaultOAuthServerConfig } from '../constants/oauthServerDefaults.js';
 
 const { Request: OAuth2Request, Response: OAuth2Response } = OAuth2Server;
 
@@ -527,9 +528,11 @@ export const getUserInfo = async (req: Request, res: Response): Promise<void> =>
 export const getMetadata = async (req: Request, res: Response): Promise<void> => {
   try {
     const systemConfig = await getSystemConfigDao().get();
-    const oauthConfig = systemConfig?.oauthServer;
+    const storedConfig = systemConfig?.oauthServer;
+    // Merge stored config with defaults so partial configs still inherit all default values
+    const oauthConfig = { ...cloneDefaultOAuthServerConfig(), ...storedConfig };
 
-    if (!oauthConfig || !oauthConfig.enabled) {
+    if (!oauthConfig.enabled) {
       res.status(404).json({ error: 'OAuth server not configured' });
       return;
     }
@@ -572,9 +575,11 @@ export const getMetadata = async (req: Request, res: Response): Promise<void> =>
 export const getProtectedResourceMetadata = async (req: Request, res: Response): Promise<void> => {
   try {
     const systemConfig = await getSystemConfigDao().get();
-    const oauthConfig = systemConfig?.oauthServer;
+    const storedConfig = systemConfig?.oauthServer;
+    // Merge stored config with defaults so partial configs still inherit all default values
+    const oauthConfig = { ...cloneDefaultOAuthServerConfig(), ...storedConfig };
 
-    if (!oauthConfig || !oauthConfig.enabled) {
+    if (!oauthConfig.enabled) {
       res.status(404).json({ error: 'OAuth server not configured' });
       return;
     }

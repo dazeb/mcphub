@@ -1,6 +1,7 @@
 import { Repository } from 'typeorm';
 import { SystemConfig } from '../entities/SystemConfig.js';
 import { getAppDataSource } from '../connection.js';
+import { cloneDefaultOAuthServerConfig } from '../../constants/oauthServerDefaults.js';
 
 /**
  * Repository for SystemConfig entity
@@ -30,7 +31,7 @@ export class SystemConfigRepository {
         mcpRouter: {},
         nameSeparator: '-',
         oauth: {},
-        oauthServer: {},
+        oauthServer: cloneDefaultOAuthServerConfig(),
         auth: {},
         enableSessionRebuild: false,
       });
