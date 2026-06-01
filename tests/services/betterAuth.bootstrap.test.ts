@@ -19,6 +19,7 @@ const runtimeConfig = {
       scopes: ['openid', 'profile', 'email'],
       pkce: true,
       prompt: 'login',
+      trustEmail: true,
     },
   },
 };
@@ -35,6 +36,7 @@ const disabledRuntimeConfig = {
       providerId: 'oidc',
       scopes: ['openid', 'profile', 'email'],
       pkce: true,
+      trustEmail: false,
     },
   },
 };
@@ -112,6 +114,12 @@ describe('betterAuth bootstrap', () => {
       expect.objectContaining({
         socialProviders: {},
         trustedOrigins: ['https://mcp.imdevinc.home'],
+        account: {
+          accountLinking: {
+            enabled: true,
+            trustedProviders: ['local-oidc'],
+          },
+        },
         plugins: [
           {
             id: 'generic-oauth',
@@ -178,6 +186,67 @@ describe('betterAuth bootstrap', () => {
             id: 'generic-oauth',
           }),
         ],
+      }),
+    );
+  });
+
+  it('includes the OIDC provider in trustedProviders when OIDC is enabled and trustEmail is true', async () => {
+    await import('../../src/betterAuth.js');
+
+    expect(betterAuthMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: {
+          accountLinking: {
+            enabled: true,
+            trustedProviders: ['local-oidc'],
+          },
+        },
+      }),
+    );
+  });
+
+  it('uses an empty trustedProviders when OIDC is enabled but trustEmail is false', async () => {
+    resolveBetterAuthRuntimeConfigMock.mockReturnValue({
+      ...runtimeConfig,
+      providers: {
+        ...runtimeConfig.providers,
+        oidc: { ...runtimeConfig.providers.oidc, trustEmail: false },
+      },
+    });
+
+    await import('../../src/betterAuth.js');
+
+    expect(betterAuthMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: {
+          accountLinking: {
+            enabled: true,
+            trustedProviders: [],
+          },
+        },
+      }),
+    );
+  });
+
+  it('uses an empty trustedProviders when OIDC is disabled', async () => {
+    resolveBetterAuthRuntimeConfigMock.mockReturnValue({
+      ...disabledRuntimeConfig,
+      providers: {
+        ...disabledRuntimeConfig.providers,
+        oidc: { ...disabledRuntimeConfig.providers.oidc, enabled: false },
+      },
+    });
+
+    await import('../../src/betterAuth.js');
+
+    expect(betterAuthMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: {
+          accountLinking: {
+            enabled: true,
+            trustedProviders: [],
+          },
+        },
       }),
     );
   });
