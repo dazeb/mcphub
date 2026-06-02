@@ -1349,9 +1349,9 @@ const SettingsPage: React.FC = () => {
       </div>
 
       {/* Bearer Keys Settings */}
-        <div className="hub-card mb-6 overflow-hidden">
+        <div className="hub-card mb-6 overflow-visible">
           <div
-            className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
+            className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] rounded-t-[9px] py-3 px-5"
             onClick={() => toggleSection('bearerKeys')}
           >
             <div className="flex items-center gap-2.5">
