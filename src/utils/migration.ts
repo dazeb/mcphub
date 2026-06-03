@@ -128,6 +128,7 @@ export async function migrateToDatabase(): Promise<boolean> {
         oauthServer: settings.systemConfig.oauthServer || {},
         auth: settings.systemConfig.auth || {},
         enableSessionRebuild: settings.systemConfig.enableSessionRebuild,
+        discovery: settings.systemConfig.discovery || {},
       };
       await systemConfigRepo.update(systemConfig);
       console.log('  - System configuration updated');

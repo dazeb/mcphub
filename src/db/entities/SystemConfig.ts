@@ -36,6 +36,9 @@ export class SystemConfig {
   @Column({ type: 'boolean', nullable: true })
   enableSessionRebuild?: boolean;
 
+  @Column({ type: 'simple-json', nullable: true })
+  discovery?: Record<string, any>;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamp' })
   createdAt: Date;
 

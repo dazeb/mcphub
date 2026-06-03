@@ -24,6 +24,7 @@ export class SystemConfigDaoDbImpl implements SystemConfigDao {
       oauthServer: config.oauthServer as any,
       auth: config.auth as any,
       enableSessionRebuild: config.enableSessionRebuild,
+      discovery: config.discovery as any,
     };
   }
 
@@ -39,6 +40,7 @@ export class SystemConfigDaoDbImpl implements SystemConfigDao {
       oauthServer: updated.oauthServer as any,
       auth: updated.auth as any,
       enableSessionRebuild: updated.enableSessionRebuild,
+      discovery: updated.discovery as any,
     };
   }
 
@@ -54,6 +56,7 @@ export class SystemConfigDaoDbImpl implements SystemConfigDao {
       oauthServer: config.oauthServer as any,
       auth: config.auth as any,
       enableSessionRebuild: config.enableSessionRebuild,
+      discovery: config.discovery as any,
     };
   }
 

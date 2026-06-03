@@ -213,6 +213,13 @@ export interface SystemConfig {
   auth?: {
     betterAuth?: BetterAuthConfig; // Better Auth integration configuration
   };
+  discovery?: {
+    // Public unauthenticated read-only discovery API for the local market catalog.
+    // When enabled, exposes /discovery/servers and /.well-known/mcp-marketplace so
+    // external MCP clients (e.g. OpenClaw, Claude Desktop installers) can find and
+    // install servers programmatically. Off by default to avoid leaking catalog data.
+    enabled?: boolean;
+  };
 }
 
 export interface UserConfig {

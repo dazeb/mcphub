@@ -70,6 +70,14 @@ import {
   getRegistryServerVersions,
   getRegistryServerVersion,
 } from '../controllers/registryController.js';
+import {
+  listDiscoveryServers,
+  getDiscoveryServer,
+  getDiscoveryServerInstall,
+  listDiscoveryCategories,
+  listDiscoveryTags,
+  getMarketplaceWellKnown,
+} from '../controllers/discoveryController.js';
 import { login, register, getCurrentUser, changePassword } from '../controllers/authController.js';
 import { getAllLogs, clearLogs, streamLogs } from '../controllers/logController.js';
 import {
@@ -411,6 +419,18 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
 
   // Public configuration endpoint (no auth required to check skipAuth setting)
   app.get(`${config.basePath}/public-config`, getPublicConfig);
+
+  // Public marketplace discovery API (issue #809). Off by default; enable via
+  // systemConfig.discovery.enabled. When disabled, all of these return 404 to
+  // avoid leaking the catalog. Designed for external MCP clients (OpenClaw,
+  // Claude Desktop installers, etc.) to programmatically find servers in the
+  // local market without dashboard auth.
+  app.get('/.well-known/mcp-marketplace', getMarketplaceWellKnown);
+  app.get(`${config.basePath}/discovery/servers`, listDiscoveryServers);
+  app.get(`${config.basePath}/discovery/servers/:name`, getDiscoveryServer);
+  app.get(`${config.basePath}/discovery/servers/:name/install`, getDiscoveryServerInstall);
+  app.get(`${config.basePath}/discovery/categories`, listDiscoveryCategories);
+  app.get(`${config.basePath}/discovery/tags`, listDiscoveryTags);
 
   // OpenAPI generation endpoints
   app.get(`${config.basePath}/api/openapi.json`, getOpenAPISpec);
