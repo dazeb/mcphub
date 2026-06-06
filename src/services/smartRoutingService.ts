@@ -8,7 +8,7 @@
 import { Tool, ServerInfo } from '../types/index.js';
 import { getServersInGroup } from './groupService.js';
 import { searchToolsByVector } from './vectorSearchService.js';
-import { getSmartRoutingConfig } from '../utils/smartRouting.js';
+import { getSmartRoutingConfig, type SmartRoutingConfig } from '../utils/smartRouting.js';
 import { getServerDao } from '../dao/index.js';
 import { getGroup } from './sseService.js';
 import { isAppOnlyTool } from '../utils/mcpApps.js';
@@ -224,7 +224,10 @@ Available servers: ${serversList}`,
  */
 const computeSmartRoutingScope = async (
   group: string | undefined,
+  smartRoutingConfig: SmartRoutingConfig,
 ): Promise<{ scopeDescription: string; serversList: string }> => {
+  const serverDescriptionMode = smartRoutingConfig.serverDescriptionMode ?? 'names';
+
   // Extract target group if pattern is $smart/{group}
   const targetGroup = group?.startsWith('$smart/') ? group.substring(7) : undefined;
 
@@ -241,18 +244,26 @@ const computeSmartRoutingScope = async (
     }
   }
 
-  // Create simple server information with only server names
-  const serversList = availableServers
-    .map((server) => {
-      return `${server.name}`;
-    })
-    .join(', ');
+  // Create simple server information with only server names or include descriptions when configured
+  const serversList =
+    serverDescriptionMode === 'full'
+      ? availableServers
+          .map((server) => {
+            const description = (server.config?.description || server.instructions || '')
+              .trim()
+              .replace(/\s+/g, ' ');
+            return description ? `- ${server.name}: ${description}` : `- ${server.name}`;
+          })
+          .join('\n')
+      : availableServers.map((server) => server.name).join(', ');
+  const formattedServersList =
+    serverDescriptionMode === 'full' && serversList ? `\n${serversList}` : serversList;
 
   const scopeDescription = targetGroup
     ? `servers in the "${targetGroup}" group`
     : 'all available servers';
 
-  return { scopeDescription, serversList };
+  return { scopeDescription, serversList: formattedServersList };
 };
 
 /** Meta-tool definitions for a scope, for an explicit PD mode (for cost only). */
@@ -260,7 +271,11 @@ export const getSmartRoutingMetaToolDefinitions = async (
   group: string | undefined,
   progressiveDisclosure: boolean,
 ): Promise<any[]> => {
-  const { scopeDescription, serversList } = await computeSmartRoutingScope(group);
+  const smartRoutingConfig = await getSmartRoutingConfig();
+  const { scopeDescription, serversList } = await computeSmartRoutingScope(
+    group,
+    smartRoutingConfig,
+  );
   return buildSmartRoutingMetaTools(scopeDescription, serversList, progressiveDisclosure);
 };
 
@@ -274,9 +289,14 @@ export const getSmartRoutingTools = async (
   const smartRoutingConfig = await getSmartRoutingConfig();
   const progressiveDisclosure = smartRoutingConfig.progressiveDisclosure ?? false;
 
-  const { scopeDescription, serversList } = await computeSmartRoutingScope(group);
+  const { scopeDescription, serversList } = await computeSmartRoutingScope(
+    group,
+    smartRoutingConfig,
+  );
 
-  return { tools: buildSmartRoutingMetaTools(scopeDescription, serversList, progressiveDisclosure) };
+  return {
+    tools: buildSmartRoutingMetaTools(scopeDescription, serversList, progressiveDisclosure),
+  };
 };
 
 /**
