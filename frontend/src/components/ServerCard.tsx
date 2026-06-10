@@ -22,6 +22,7 @@ import ToolCard from '@/components/ui/ToolCard';
 import PromptCard from '@/components/ui/PromptCard';
 import ResourceCard from '@/components/ui/ResourceCard';
 import DeleteDialog from '@/components/ui/DeleteDialog';
+import { Switch } from '@/components/ui/ToggleGroup';
 import { useToast } from '@/contexts/ToastContext';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useAuth } from '@/contexts/AuthContext';
@@ -175,13 +176,14 @@ const ServerCard = ({
   const totalResources = server.resources?.length || 0;
   const enabledResources = server.resources?.filter((r) => r.enabled !== false).length || 0;
   const isMcpApp = serverExposesMcpApp(server);
+  const enabled = server.enabled !== false;
+  const canManage = canManageServer(server, auth.user);
 
-  const handleToggle = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleToggle = async (nextEnabled: boolean) => {
     if (!canManage || isToggling || !onToggle) return;
     setIsToggling(true);
     try {
-      await onToggle(server, !(server.enabled !== false));
+      await onToggle(server, nextEnabled);
     } finally {
       setIsToggling(false);
     }
@@ -408,8 +410,6 @@ const ServerCard = ({
     return parts.join(' ');
   })();
 
-  const enabled = server.enabled !== false;
-  const canManage = canManageServer(server, auth.user);
   const serverEndpoint = `${baseUrl}/mcp/${server.name}`;
   const translateVisibility = (key: string, options?: { defaultValue?: string }) => t(key, options);
   const visibility = getServerVisibilityDisplay(
@@ -654,7 +654,7 @@ const ServerCard = ({
           ) : null}
 
           {/* Toggle switch */}
-          <div className="flex items-center justify-center">
+          <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
             <LoadingControl
               isLoading={isToggling}
               className="h-[18px] w-[30px]"
@@ -664,12 +664,12 @@ const ServerCard = ({
               }}
               spinnerSize={10}
             >
-              <button
-                type="button"
-                className={'hub-switch' + (enabled ? ' on' : '')}
-                onClick={handleToggle}
+              <Switch
+                checked={enabled}
+                onCheckedChange={handleToggle}
                 disabled={isToggling || !canManage}
-                aria-label={enabled ? t('server.disable') : t('server.enable')}
+                size="compact"
+                aria-label={`${t(enabled ? 'server.disable' : 'server.enable')} ${server.name}`}
               />
             </LoadingControl>
           </div>

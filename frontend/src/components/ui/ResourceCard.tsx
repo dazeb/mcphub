@@ -47,6 +47,8 @@ const ResourceCard = ({ resource, readOnly = false, onToggle, onDescriptionUpdat
     setCustomDescription(resource.description || '');
   }, [resource.description]);
 
+  const resourceDisplayName = resource.name || resource.uri;
+
   const handleToggle = (enabled: boolean) => {
     if (!readOnly && onToggle) {
       onToggle(resource.uri, enabled);
@@ -93,7 +95,7 @@ const ResourceCard = ({ resource, readOnly = false, onToggle, onDescriptionUpdat
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="hub-mono font-medium truncate" style={{ fontSize: 13, color: 'var(--hub-ink)' }}>
-              {resource.name || resource.uri}
+              {resourceDisplayName}
             </span>
             <span className="hub-mono truncate" style={{ fontSize: 11.5, color: 'var(--hub-ink-3)' }}>
               {resource.uri}
@@ -160,11 +162,13 @@ const ResourceCard = ({ resource, readOnly = false, onToggle, onDescriptionUpdat
               Σ {formatTokens(cost)}
             </span>
           )}
-          <div onClick={(e) => e.stopPropagation()}>
+          <div className="flex h-[26px] items-center" onClick={(e) => e.stopPropagation()}>
             <Switch
               checked={resource.enabled !== false}
               onCheckedChange={handleToggle}
               disabled={readOnly}
+              size="card"
+              aria-label={`${t(resource.enabled !== false ? 'server.disable' : 'server.enable')} ${resourceDisplayName}`}
             />
           </div>
           <button className="hub-icon-btn sm">
