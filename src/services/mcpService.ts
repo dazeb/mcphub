@@ -1205,11 +1205,21 @@ export const initializeClientsFromSettings = async (
         continue;
       }
 
-      // Check if server is already connected
-      const existingServer = existingServerInfos.find(
-        (s) => s.name === name && s.status === 'connected',
-      );
-      if (existingServer && (!serverName || serverName !== name)) {
+      // Reuse this server's existing runtime state instead of reconnecting when:
+      // - a targeted reload/reconnect (serverName) was requested for a
+      //   *different* server — preserve its current state regardless of
+      //   status. Reloading one server must not reconnect unrelated servers
+      //   (e.g. failed/disconnected ones), which would also leak their
+      //   previous stdio child processes. See #921.
+      // - a general/full initialization (no serverName) — only preserve this
+      //   server's state if it is already connected.
+      const existingServer = existingServerInfos.find((s) => s.name === name);
+      const isDifferentServer = Boolean(serverName) && serverName !== name;
+      if (
+        existingServer &&
+        (isDifferentServer ||
+          (!serverName && existingServer.status === 'connected'))
+      ) {
         nextServerInfos.push({
           ...existingServer,
           enabled: expandedConf.enabled === undefined ? true : expandedConf.enabled,
