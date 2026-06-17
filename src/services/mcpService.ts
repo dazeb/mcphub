@@ -79,6 +79,11 @@ import {
   isAppOnlyTool,
   stripMcpAppsMetadata,
 } from '../utils/mcpApps.js';
+import {
+  supportsCacheRefresh,
+  injectRefreshFlag,
+  clearRunnerCache,
+} from '../utils/cacheUtils.js';
 
 const servers: { [sessionId: string]: Server } = {};
 
@@ -485,6 +490,10 @@ const normalizeResourceForCache = (resource: McpResource): Resource => {
 
 // Store all server information
 let serverInfos: ServerInfo[] = [];
+
+// Track servers pending a cache-refresh reinstall.
+// Consumed once by createTransportFromConfig on the next reconnect.
+const pendingReinstalls = new Set<string>();
 
 // Grace period after sending SIGTERM to a stdio process tree before falling back
 // to SIGKILL. Long enough to let well-behaved servers shut down cleanly, short
@@ -1045,10 +1054,20 @@ export const createTransportFromConfig = async (name: string, conf: ServerConfig
     }
 
     // Apply proxychains4 wrapper if proxy is configured (Linux/macOS only)
+    let resolvedArgs = replaceEnvVars(conf.args) as string[];
+
+    // If this server is pending a reinstall, inject cache-busting flags (uvx only).
+    // For npx, the cache directory was already cleared before reconnect.
+    if (pendingReinstalls.has(name)) {
+      resolvedArgs = injectRefreshFlag(conf.command, resolvedArgs);
+      pendingReinstalls.delete(name);
+      console.log(`[${name}] Injected cache refresh flags for reinstall`);
+    }
+
     const { command: finalCommand, args: finalArgs } = wrapWithProxychains(
       name,
       conf.command,
-      replaceEnvVars(conf.args) as string[],
+      resolvedArgs,
       conf.proxy,
     );
 
@@ -1636,10 +1655,14 @@ export const getServersInfo = async (
             }
           : undefined,
         config:
-          resolvedType || serverConfig?.description
+          resolvedType || serverConfig?.description || serverConfig?.command
             ? {
                 ...(resolvedType ? { type: resolvedType } : {}),
                 ...(serverConfig?.description ? { description: serverConfig.description } : {}),
+                // Expose command so the frontend can determine if reinstall is
+                // supported (npx/uvx only). This is not a secret — it's the
+                // runner binary name (e.g. "npx", "uvx").
+                ...(serverConfig?.command ? { command: serverConfig.command } : {}),
               }
             : undefined,
       };
@@ -1702,6 +1725,52 @@ export const reconnectServer = async (serverName: string): Promise<void> => {
   await initializeClientsFromSettings(false, serverName);
 
   console.log(`Successfully reconnected server: ${serverName}`);
+};
+
+// Reinstall server: clear package cache and reconnect.
+// For npx: deletes ~/.npm/_npx before reconnect (--ignore-existing removed in npm 7+).
+// For uvx: schedules --refresh flag injection on next spawn via pendingReinstalls Set.
+export const reinstallServer = async (serverName: string): Promise<void> => {
+  console.log(`Reinstalling server: ${serverName}`);
+
+  const serverInfo = getServerByName(serverName);
+  if (!serverInfo) {
+    throw new Error(`Server not found: ${serverName}`);
+  }
+
+  const serverConfig = await getServerDao().findById(serverName);
+  if (!serverConfig) {
+    throw new Error(`Server configuration not found: ${serverName}`);
+  }
+
+  if (serverConfig.enabled === false) {
+    throw new Error(`Cannot reinstall a disabled server: ${serverName}`);
+  }
+
+  const command = serverConfig.command;
+  if (!command || !supportsCacheRefresh(command)) {
+    throw new Error(
+      `Server "${serverName}" does not support cache refresh (command: ${command || 'none'}). Only npx and uvx servers are supported.`,
+    );
+  }
+
+  // Mark server as pending reinstall (consumed by createTransportFromConfig for uvx)
+  pendingReinstalls.add(serverName);
+
+  try {
+    // For npx, clear cache directory synchronously before reconnect.
+    // For uvx, this is a no-op — refresh is handled via --refresh flag injection.
+    await clearRunnerCache(command);
+
+    // Close and reconnect (will pick up pendingReinstalls flag for uvx)
+    await reconnectServer(serverName);
+
+    console.log(`Successfully initiated reinstall for server: ${serverName}`);
+  } catch (error) {
+    // Clean up pendingReinstalls on failure to avoid stale entries
+    pendingReinstalls.delete(serverName);
+    throw error;
+  }
 };
 
 // Filter tools by server configuration
