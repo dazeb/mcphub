@@ -275,6 +275,21 @@ async function truncateWithHFTokenizer(
   maxTokens: number,
   model: string,
 ): Promise<string> {
+  // Pre-filter: skip the tokenizer download when truncation cannot trigger.
+  // The token count is bounded by text.length * 3 + 2:
+  //  - content tokens <= UTF-8 byte count <= 3 * text.length. Each UTF-16 code
+  //    unit maps to at most 3 UTF-8 bytes: BMP chars (1 code unit) are <= 3
+  //    bytes, and 4-byte chars (non-BMP) occupy 2 code units, so <= 2 per unit.
+  //    Under byte-fallback (XLM-RoBERTa, used by bge-m3) each byte is one token.
+  //  - +2 for the <s> (BOS) and </s> (EOS) special tokens XLM-RoBERTa wraps
+  //    around the input, which count toward the model's max sequence length.
+  // When this bound <= maxTokens the text provably fits, so the ~10s download
+  // round-trip can be skipped (issue #935). bge-m3's limit is 8192; typical
+  // search_tools queries are 10-50 chars.
+  if (text.length * 3 + 2 <= maxTokens) {
+    return text;
+  }
+
   const modelId = getHFModelId(model);
 
   // Helper: apply token-level truncation using a downloaded tokenizer instance.
