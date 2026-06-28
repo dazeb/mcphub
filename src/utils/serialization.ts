@@ -229,19 +229,73 @@ export const formatErrorForLogging = (error: unknown): string => {
   return parts.join(' | ') || 'Unknown error';
 };
 
-const createSafeJsonReplacer = () => {
-  const seen = new WeakSet<object>();
+const CIRCULAR_REFERENCE = '[Circular Reference]';
 
-  return (_key: string, value: unknown): unknown => {
-    if (typeof value === 'object' && value !== null) {
-      if (seen.has(value)) {
-        return '[Circular Reference]';
+/**
+ * Tracks the chain of ancestors during a single JSON.stringify traversal so
+ * that only true circular references (an object that contains itself, directly
+ * or transitively) are flagged — not diamond/shared references where the same
+ * object is reachable from two sibling keys.
+ *
+ * A naive `WeakSet` of every visited object cannot tell the two apart: it marks
+ * a shared-but-acyclic object as circular the second time it is seen, silently
+ * dropping data. JSON.stringify traverses depth-first and invokes the replacer
+ * with `this` bound to the object that holds the current value, so we keep an
+ * ancestor stack and unwind it back to the current holder before each check.
+ */
+const createAncestorTracker = () => {
+  const stack: unknown[] = [];
+
+  return {
+    isCircular(holder: unknown, value: unknown): boolean {
+      // Unwind to the current holder: siblings share a holder, so anything still
+      // on the stack below it belongs to an already-finished branch.
+      while (stack.length > 0 && stack[stack.length - 1] !== holder) {
+        stack.pop();
       }
 
-      seen.add(value);
+      if (stack.includes(value)) {
+        return true;
+      }
+
+      stack.push(value);
+      return false;
+    },
+    // When a value is replaced mid-traversal (an Error becomes a plain object),
+    // swap it on the stack too. JSON.stringify walks the *replacement's*
+    // properties next, passing it as the holder, so the stack must reference the
+    // replacement or the unwind above would empty the stack and miss cycles that
+    // close through the error.
+    replace(oldValue: unknown, newValue: unknown): void {
+      const index = stack.indexOf(oldValue);
+      if (index !== -1) {
+        stack[index] = newValue;
+      }
+    },
+  };
+};
+
+const createSafeJsonReplacer = () => {
+  const tracker = createAncestorTracker();
+  // serializeError() returns a fresh object on each call, so a cyclic
+  // Error.cause chain would keep producing new objects forever; this guard
+  // breaks it independently of the ancestor stack.
+  const seenErrors = new WeakSet<Error>();
+
+  return function (this: unknown, _key: string, value: unknown): unknown {
+    if (typeof value === 'object' && value !== null) {
+      if (tracker.isCircular(this, value)) {
+        return CIRCULAR_REFERENCE;
+      }
 
       if (value instanceof Error) {
-        return serializeError(value);
+        if (seenErrors.has(value)) {
+          return CIRCULAR_REFERENCE;
+        }
+        seenErrors.add(value);
+        const serialized = serializeError(value);
+        tracker.replace(value, serialized);
+        return serialized;
       }
     }
 
@@ -250,9 +304,10 @@ const createSafeJsonReplacer = () => {
 };
 
 const createSafeLogReplacer = () => {
-  const seen = new WeakSet<object>();
+  const tracker = createAncestorTracker();
+  const seenErrors = new WeakSet<Error>();
 
-  return (key: string, value: unknown): unknown => {
+  return function (this: unknown, key: string, value: unknown): unknown {
     if (isSensitiveLogKey(key)) {
       return REDACTED_VALUE;
     }
@@ -262,14 +317,18 @@ const createSafeLogReplacer = () => {
     }
 
     if (typeof value === 'object' && value !== null) {
-      if (seen.has(value)) {
-        return '[Circular Reference]';
+      if (tracker.isCircular(this, value)) {
+        return CIRCULAR_REFERENCE;
       }
 
-      seen.add(value);
-
       if (value instanceof Error) {
-        return serializeError(value);
+        if (seenErrors.has(value)) {
+          return CIRCULAR_REFERENCE;
+        }
+        seenErrors.add(value);
+        const serialized = serializeError(value);
+        tracker.replace(value, serialized);
+        return serialized;
       }
     }
 
