@@ -4,7 +4,7 @@ import { OpenAPIV3 } from 'openapi-types';
 import { ServerConfig, OpenAPISecurityConfig } from '../types/index.js';
 import { assertSafeUrl } from '../utils/ssrf.js';
 import { getUserDao } from '../dao/index.js';
-import { sanitizeStringForLogging } from '../utils/serialization.js';
+import { sanitizeStringForLogging, createSafeJSON } from '../utils/serialization.js';
 
 export interface OpenAPIToolInfo {
   name: string;
@@ -316,7 +316,21 @@ export class OpenAPIClient {
     }
 
     // Get the first server's URL
-    const serverUrl = this.spec.servers[0].url;
+    const server = this.spec.servers[0];
+    let serverUrl = server.url;
+
+    // OpenAPI server URLs may contain {variable} templates that must be
+    // substituted with the variable's `default` before use (e.g. seerr declares
+    // `url: '{server}/api/v1'` with `variables.server.default`). Without
+    // substitution the literal '{server}/api/v1' is misclassified as a relative
+    // path and glued onto the spec source host, 404-ing every tool call.
+    if (server.variables) {
+      for (const [name, variable] of Object.entries(server.variables)) {
+        if (variable?.default !== undefined) {
+          serverUrl = serverUrl.split(`{${name}}`).join(variable.default);
+        }
+      }
+    }
 
     // If it's a relative path, combine with original spec URL
     if (serverUrl.startsWith('/')) {
@@ -389,7 +403,14 @@ export class OpenAPIClient {
           name: operationName,
           description:
             operation.summary || operation.description || `${method.toUpperCase()} ${path}`,
-          inputSchema: this.generateInputSchema(operation, path, method as string),
+          // SwaggerParser.dereference turns recursive $ref schemas into live
+          // circular references on the dereferenced spec objects. generateInputSchema
+          // references those objects directly, so without sanitization every
+          // downstream serializer (tokenCost, getServerConfig, MCP ListTools,
+          // embeddings) throws "Converting circular structure to JSON". See #959.
+          inputSchema: createSafeJSON(
+            this.generateInputSchema(operation, path, method as string),
+          ),
           operationId: operation.operationId || operationName,
           method: method as string,
           path,
